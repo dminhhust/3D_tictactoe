@@ -1,0 +1,1717 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>3D Rubik's Cube Tic-Tac-Toe (5x5x5)</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --panel: rgba(21, 27, 35, 0.88);
+      --text: #e6edf3;
+      --muted: #9ea7b3;
+      --accent: #58a6ff;
+      --warn: #f2cc60;
+      --ok: #3fb950;
+      --danger: #f85149;
+    }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+      overflow: hidden;
+    }
+    #app {
+      position: fixed;
+      inset: 0;
+    }
+    #ui {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      width: min(420px, calc(100vw - 24px));
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      padding: 10px 12px;
+      backdrop-filter: blur(5px);
+      z-index: 20;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .row:last-child {
+      margin-bottom: 0;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+    }
+    .value {
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    #message {
+      margin-top: 8px;
+      min-height: 22px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    #message.info { color: var(--warn); }
+    #message.win { color: var(--ok); }
+    #message.lose { color: var(--danger); }
+    .btns {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    button {
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    button:hover { border-color: var(--accent); }
+    select {
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    #axisLegend {
+      position: fixed;
+      right: 12px;
+      top: 12px;
+      z-index: 20;
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      width: min(290px, calc(100vw - 24px));
+    }
+    #axisLegend b {
+      color: var(--text);
+      font-weight: 700;
+    }
+    #bootError {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: min(680px, calc(100vw - 28px));
+      background: rgba(30, 12, 14, 0.96);
+      border: 1px solid rgba(248, 81, 73, 0.65);
+      border-radius: 8px;
+      padding: 14px 16px;
+      z-index: 40;
+      color: #ffd7d5;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    #bootError b {
+      display: block;
+      color: #ffb4ae;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="ui">
+    <div class="row">
+      <span class="label">Current Player</span>
+      <span class="value" id="playerText">Player X</span>
+    </div>
+    <div class="row">
+      <span class="label">Turn Phase</span>
+      <span class="value" id="phaseText">Mark</span>
+    </div>
+    <div class="row">
+      <span class="label">View Axis / Layer</span>
+      <span class="value" id="axisText">Z / 3</span>
+    </div>
+    <div class="row">
+      <span class="label">Game Mode</span>
+      <select id="modeSelect" class="value" aria-label="Game mode">
+        <option value="pvp_local">PvP Local</option>
+        <option value="pve_local">PvE Local (MCTS)</option>
+        <option value="online_duel">Online Duel</option>
+      </select>
+    </div>
+    <div class="row">
+      <span class="label">AI Status</span>
+      <span class="value" id="aiStatusText">Idle</span>
+    </div>
+    <div class="row">
+      <button id="createRoomBtn">Create Invite Link</button>
+      <span class="value" id="onlineStatusText">Offline</span>
+    </div>
+    <div class="hint" id="inviteText"></div>
+    <div id="message" class="info">Click a sticker to place your mark.</div>
+    <div class="btns">
+      <button id="skipRotateBtn">Skip Rotation (Enter)</button>
+      <button id="newGameBtn">New Game</button>
+    </div>
+    <div class="hint">
+      Mouse: drag to orbit camera, click sticker to mark, click translucent 3D buttons for layer rotate.<br />
+      Keyboard (Rotate phase): 1-5 select layer, A/D or Left/Right rotate, Enter to skip.
+    </div>
+  </div>
+  <div id="axisLegend">
+    <b>Orientation Hint</b><br />
+    Axes helper: X=red, Y=green, Z=blue. Layer index 1..5 maps to axis position -2..2.
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module">
+    const app = document.getElementById('app');
+    const ui = document.getElementById('ui');
+    const legend = document.getElementById('axisLegend');
+
+    function showBootError(err) {
+      console.error('Game boot failed:', err);
+      const panel = document.createElement('div');
+      panel.id = 'bootError';
+      panel.innerHTML =
+        '<b>Rendering failed to start.</b>' +
+        'Reason: ' + (err && err.message ? err.message : String(err)) + '\n\n' +
+        'Try running with a local static server:\n' +
+        '1) Open terminal in D:\\self_study\\3D_tictactoe\n' +
+        '2) python -m http.server 8080\n' +
+        '3) Open http://localhost:8080';
+      document.body.appendChild(panel);
+      if (ui) ui.style.opacity = '0.55';
+      if (legend) legend.style.opacity = '0.55';
+    }
+
+    async function init() {
+      const THREE = await import('three');
+      const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
+
+      // Core constants
+      const N = 5;
+      const HALF = 2;
+      const STICKER_SIZE = 0.86;
+      const STICKER_THICK = 0.11;
+      const STICKER_OUTSET = 0.56;
+      const SCRAMBLE_MOVES = 25;
+      const FACE_NAMES = ['F', 'B', 'R', 'L', 'U', 'D'];
+      const FACE_COLOR_HEX = {
+        F: 0x2f81f7, // blue
+        B: 0xf85149, // red
+        R: 0xfb8500, // orange
+        L: 0x3fb950, // green
+        U: 0xf2cc60, // yellow
+        D: 0xe6edf3  // white
+      };
+      const PLAYER_MARKS = ['X', 'O'];
+
+      // Scene setup
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0e1116);
+      const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 100);
+      camera.position.set(7.5, 7, 8);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      app.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.set(0, 0, 0);
+
+      // Lighting and orientation helpers
+      scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+      const keyLight = new THREE.DirectionalLight(0xffffff, 1.05);
+      keyLight.position.set(8, 12, 10);
+      scene.add(keyLight);
+      scene.add(new THREE.AxesHelper(6));
+
+    const core = new THREE.Mesh(
+      new THREE.BoxGeometry(5.2, 5.2, 5.2),
+      new THREE.MeshStandardMaterial({ color: 0x10151d, metalness: 0.08, roughness: 0.9 })
+    );
+    core.visible = false;
+    scene.add(core);
+
+    // UI elements
+    const playerText = document.getElementById('playerText');
+    const phaseText = document.getElementById('phaseText');
+    const axisText = document.getElementById('axisText');
+    const modeSelect = document.getElementById('modeSelect');
+    const aiStatusText = document.getElementById('aiStatusText');
+    const onlineStatusText = document.getElementById('onlineStatusText');
+    const inviteText = document.getElementById('inviteText');
+    const createRoomBtn = document.getElementById('createRoomBtn');
+    const messageEl = document.getElementById('message');
+    const skipRotateBtn = document.getElementById('skipRotateBtn');
+    const newGameBtn = document.getElementById('newGameBtn');
+
+    // Runtime state
+    let stickers = [];
+    let cubies = [];
+    let faceGrids = {};
+    let currentPlayer = 0; // 0->X, 1->O
+    let phase = 'mark';    // mark | rotate | gameover
+    let rotating = false;
+    let gameOver = false;
+    let selectedAxis = 'z';
+    let selectedLayer = 2; // index 0..4
+    let hoveredLayerCoord = null;
+    let rotationButtons = [];
+    let layerIndicator = null;
+    let gameMode = 'pvp_local'; // pvp_local | pve_local | online_duel
+    const humanPlayer = 0; // X
+    const aiPlayer = 1;    // O
+    let aiThinking = false;
+    const mctsTimeBudgetMs = 1500;
+    let roomId = null;
+    let inviteToken = null;
+    let ws = null;
+    let mySlot = null;
+    let onlineConnected = false;
+    let lastRotation = null; // { byPlayer, axis, layerCoord, dir } | null
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function axisVector(axis) {
+      if (axis === 'x') return new THREE.Vector3(1, 0, 0);
+      if (axis === 'y') return new THREE.Vector3(0, 1, 0);
+      return new THREE.Vector3(0, 0, 1);
+    }
+
+    function layerIndexToCoord(layerIndex) {
+      return layerIndex - HALF;
+    }
+
+    function coordToLayerIndex(coord) {
+      return coord + HALF;
+    }
+
+    function roundToInt(v) {
+      return Math.round(v);
+    }
+
+    function oppositePlayer(player) {
+      return player === 0 ? 1 : 0;
+    }
+
+    function randomChoice(arr) {
+      return arr[Math.floor(Math.random() * arr.length)];
+    }
+
+    function isReverseRotationForbiddenLive(axis, layerCoord, dir, actingPlayer) {
+      if (!lastRotation) return false;
+      if (lastRotation.byPlayer === actingPlayer) return false;
+      return lastRotation.axis === axis && lastRotation.layerCoord === layerCoord && lastRotation.dir === -dir;
+    }
+
+    function isReverseRotationForbiddenInState(state, actingPlayer, axis, layerCoord, dir) {
+      const last = state.lastRotation;
+      if (!last) return false;
+      if (last.byPlayer === actingPlayer) return false;
+      return last.axis === axis && last.layerCoord === layerCoord && last.dir === -dir;
+    }
+
+    function sampleWithoutReplacement(arr, count) {
+      if (arr.length <= count) return arr.slice();
+      const copy = arr.slice();
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const t = copy[i];
+        copy[i] = copy[j];
+        copy[j] = t;
+      }
+      return copy.slice(0, count);
+    }
+
+    function rotateGridVector(v, axis, dir) {
+      const vec = new THREE.Vector3(v.x, v.y, v.z);
+      vec.applyAxisAngle(axisVector(axis), dir * Math.PI / 2);
+      return { x: roundToInt(vec.x), y: roundToInt(vec.y), z: roundToInt(vec.z) };
+    }
+
+    function normalToFace(normal) {
+      if (normal.z === 1) return 'F';
+      if (normal.z === -1) return 'B';
+      if (normal.x === 1) return 'R';
+      if (normal.x === -1) return 'L';
+      if (normal.y === 1) return 'U';
+      return 'D';
+    }
+
+    function createTextCanvasTexture(text, color = '#111111', bg = 'rgba(255,255,255,0.68)', stroke = '#ffffff') {
+      const size = 256;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, size, size);
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, size, size);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 8;
+      ctx.strokeRect(4, 4, size - 8, size - 8);
+      ctx.font = 'bold 170px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = color;
+      ctx.fillText(text, size / 2, size / 2 + 10);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.needsUpdate = true;
+      return tex;
+    }
+
+    function createMarkOverlay(sticker, mark) {
+      const color = mark === 'X' ? '#1f6feb' : '#d1242f';
+      const texture = createTextCanvasTexture(mark, color);
+      const overlay = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.82, 0.82),
+        new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide
+        })
+      );
+      overlay.position.set(0, 0, STICKER_THICK / 2 + 0.01);
+      sticker.mesh.add(overlay);
+      sticker.overlay = overlay;
+    }
+
+    function setStickerTransform(sticker) {
+      const pos = new THREE.Vector3(sticker.cubie.x, sticker.cubie.y, sticker.cubie.z)
+        .add(new THREE.Vector3(sticker.normal.x, sticker.normal.y, sticker.normal.z).multiplyScalar(STICKER_OUTSET));
+      sticker.mesh.position.copy(pos);
+      const quat = new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 0, 1),
+        new THREE.Vector3(sticker.normal.x, sticker.normal.y, sticker.normal.z)
+      );
+      sticker.mesh.quaternion.copy(quat);
+    }
+
+    function setCubieTransform(cubie) {
+      cubie.mesh.position.set(cubie.coord.x, cubie.coord.y, cubie.coord.z);
+      cubie.mesh.quaternion.identity();
+    }
+
+    function makeFaceGrid() {
+      const grid = [];
+      for (let r = 0; r < N; r++) {
+        grid[r] = [];
+        for (let c = 0; c < N; c++) grid[r][c] = null;
+      }
+      return grid;
+    }
+
+    function getFaceCell(sticker) {
+      const { x, y, z } = sticker.cubie;
+      const n = sticker.normal;
+      if (n.z === 1) return { face: 'F', row: HALF - y, col: x + HALF };
+      if (n.z === -1) return { face: 'B', row: HALF - y, col: HALF - x };
+      if (n.x === 1) return { face: 'R', row: HALF - y, col: HALF - z };
+      if (n.x === -1) return { face: 'L', row: HALF - y, col: z + HALF };
+      if (n.y === 1) return { face: 'U', row: z + HALF, col: x + HALF };
+      return { face: 'D', row: HALF - z, col: x + HALF };
+    }
+
+    function rebuildFaceGrids() {
+      faceGrids = { F: makeFaceGrid(), B: makeFaceGrid(), R: makeFaceGrid(), L: makeFaceGrid(), U: makeFaceGrid(), D: makeFaceGrid() };
+      for (const sticker of stickers) {
+        const { face, row, col } = getFaceCell(sticker);
+        faceGrids[face][row][col] = {
+          colorIndex: sticker.colorIndex,
+          mark: sticker.mark,
+          mesh: sticker.mesh,
+          stickerRef: sticker
+        };
+      }
+    }
+
+    function clearBoardMeshes() {
+      for (const s of stickers) {
+        if (s.overlay) {
+          s.mesh.remove(s.overlay);
+          s.overlay.material.map.dispose();
+          s.overlay.material.dispose();
+          s.overlay.geometry.dispose();
+        }
+        scene.remove(s.mesh);
+        s.mesh.material.dispose();
+        s.mesh.geometry.dispose();
+      }
+      stickers = [];
+      for (const c of cubies) {
+        scene.remove(c.mesh);
+        c.mesh.material.dispose();
+        c.mesh.geometry.dispose();
+      }
+      cubies = [];
+      if (layerIndicator) {
+        scene.remove(layerIndicator);
+        layerIndicator.geometry.dispose();
+        layerIndicator.material.dispose();
+        layerIndicator = null;
+      }
+      for (const btn of rotationButtons) {
+        scene.remove(btn.sprite);
+        btn.sprite.material.map.dispose();
+        btn.sprite.material.dispose();
+      }
+      rotationButtons = [];
+    }
+
+    function buildStickersFromSolvedCube() {
+      const stickerGeo = new THREE.BoxGeometry(STICKER_SIZE, STICKER_SIZE, STICKER_THICK);
+      const cubieGeo = new THREE.BoxGeometry(0.94, 0.94, 0.94);
+      let id = 0;
+      for (let x = -HALF; x <= HALF; x++) {
+        for (let y = -HALF; y <= HALF; y++) {
+          for (let z = -HALF; z <= HALF; z++) {
+            addCubie({ x, y, z }, cubieGeo);
+            if (x === HALF) addSticker({ x, y, z }, { x: 1, y: 0, z: 0 }, 'R', stickerGeo, id++);
+            if (x === -HALF) addSticker({ x, y, z }, { x: -1, y: 0, z: 0 }, 'L', stickerGeo, id++);
+            if (y === HALF) addSticker({ x, y, z }, { x: 0, y: 1, z: 0 }, 'U', stickerGeo, id++);
+            if (y === -HALF) addSticker({ x, y, z }, { x: 0, y: -1, z: 0 }, 'D', stickerGeo, id++);
+            if (z === HALF) addSticker({ x, y, z }, { x: 0, y: 0, z: 1 }, 'F', stickerGeo, id++);
+            if (z === -HALF) addSticker({ x, y, z }, { x: 0, y: 0, z: -1 }, 'B', stickerGeo, id++);
+          }
+        }
+      }
+    }
+
+    function addCubie(coord, geometry) {
+      const mesh = new THREE.Mesh(
+        geometry.clone(),
+        new THREE.MeshStandardMaterial({
+          color: 0x11161d,
+          roughness: 0.9,
+          metalness: 0.02
+        })
+      );
+      const cubie = { coord: { ...coord }, mesh };
+      setCubieTransform(cubie);
+      scene.add(mesh);
+      cubies.push(cubie);
+    }
+
+    function addSticker(cubie, normal, face, geometry, id) {
+      const material = new THREE.MeshStandardMaterial({
+        color: FACE_COLOR_HEX[face],
+        roughness: 0.55,
+        metalness: 0.08,
+        emissive: 0x000000,
+        emissiveIntensity: 0
+      });
+      const mesh = new THREE.Mesh(geometry.clone(), material);
+      const sticker = {
+        id,
+        cubie: { ...cubie },
+        normal: { ...normal },
+        colorIndex: FACE_NAMES.indexOf(face),
+        colorFace: face,
+        mark: null,
+        overlay: null,
+        mesh
+      };
+      mesh.userData.type = 'sticker';
+      mesh.userData.stickerId = id;
+      setStickerTransform(sticker);
+      scene.add(mesh);
+      stickers.push(sticker);
+    }
+
+    function getCurrentViewAxis() {
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      const ax = Math.abs(dir.x);
+      const ay = Math.abs(dir.y);
+      const az = Math.abs(dir.z);
+      if (ax > ay && ax > az) return 'x';
+      if (ay > az) return 'y';
+      return 'z';
+    }
+
+    function updateSelectedAxisFromCamera() {
+      const newAxis = getCurrentViewAxis();
+      if (newAxis !== selectedAxis) {
+        selectedAxis = newAxis;
+        buildRotationButtons();
+        updateLayerIndicator();
+      }
+      axisText.textContent = selectedAxis.toUpperCase() + ' / ' + (selectedLayer + 1);
+    }
+
+    function makeButtonTexture(label) {
+      const c = document.createElement('canvas');
+      c.width = 256;
+      c.height = 128;
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.fillStyle = 'rgba(90,140,255,0.40)';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(4, 4, c.width - 8, c.height - 8);
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = 'bold 54px Arial';
+      ctx.fillText(label, c.width / 2, c.height / 2 + 2);
+      return new THREE.CanvasTexture(c);
+    }
+
+    function buildRotationButtons() {
+      for (const btn of rotationButtons) {
+        scene.remove(btn.sprite);
+        btn.sprite.material.map.dispose();
+        btn.sprite.material.dispose();
+      }
+      rotationButtons = [];
+      const btnDist = 3.6;
+      for (let layer = 0; layer < N; layer++) {
+        const coord = layerIndexToCoord(layer);
+        addRotateButton(layer, coord, 1, btnDist);
+        addRotateButton(layer, coord, -1, btnDist);
+      }
+      updateRotationButtonsVisual();
+    }
+
+    function addRotateButton(layerIndex, coord, dir, dist) {
+      const label = (layerIndex + 1) + (dir > 0 ? ' CW' : ' CCW');
+      const tex = makeButtonTexture(label);
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          opacity: 0.52
+        })
+      );
+      sprite.scale.set(1.2, 0.6, 1);
+      const offsetA = dir > 0 ? dist : -dist;
+      if (selectedAxis === 'x') sprite.position.set(coord, 3.45, offsetA);
+      if (selectedAxis === 'y') sprite.position.set(3.45, coord, offsetA);
+      if (selectedAxis === 'z') sprite.position.set(offsetA, 3.45, coord);
+      sprite.userData.type = 'rotBtn';
+      sprite.userData.layerIndex = layerIndex;
+      sprite.userData.layerCoord = coord;
+      sprite.userData.dir = dir;
+      scene.add(sprite);
+      rotationButtons.push({ sprite, layerIndex, layerCoord: coord, dir });
+    }
+
+    function updateRotationButtonsVisual() {
+      for (const btn of rotationButtons) {
+        const active = btn.layerIndex === selectedLayer;
+        btn.sprite.material.opacity = active ? 0.9 : 0.4;
+      }
+    }
+
+    function updateLayerIndicator() {
+      if (!layerIndicator) {
+        layerIndicator = new THREE.Mesh(
+          new THREE.PlaneGeometry(5.5, 5.5),
+          new THREE.MeshBasicMaterial({
+            color: 0x7aa2ff,
+            transparent: true,
+            opacity: 0.13,
+            side: THREE.DoubleSide,
+            depthWrite: false
+          })
+        );
+        scene.add(layerIndicator);
+      }
+      const layerCoord = hoveredLayerCoord !== null ? hoveredLayerCoord : layerIndexToCoord(selectedLayer);
+      layerIndicator.visible = phase === 'rotate' && !gameOver;
+      if (!layerIndicator.visible) return;
+      layerIndicator.position.set(0, 0, 0);
+      layerIndicator.rotation.set(0, 0, 0);
+      if (selectedAxis === 'x') {
+        layerIndicator.position.x = layerCoord;
+        layerIndicator.rotation.y = Math.PI / 2;
+      } else if (selectedAxis === 'y') {
+        layerIndicator.position.y = layerCoord;
+        layerIndicator.rotation.x = Math.PI / 2;
+      } else {
+        layerIndicator.position.z = layerCoord;
+      }
+    }
+
+    function setMessage(text, klass = 'info') {
+      messageEl.textContent = text;
+      messageEl.className = klass;
+    }
+
+    function isAiTurn() {
+      return gameMode === 'pve_local' && currentPlayer === aiPlayer;
+    }
+
+    function isOnlineMode() {
+      return gameMode === 'online_duel';
+    }
+
+    function isMyTurnOnline() {
+      return isOnlineMode() && onlineConnected && mySlot !== null && mySlot === currentPlayer && !gameOver;
+    }
+
+    function isHumanInputLocked() {
+      if (gameOver || rotating || aiThinking || isAiTurn()) return true;
+      if (isOnlineMode()) return !isMyTurnOnline() || phase === 'gameover';
+      return false;
+    }
+
+    function setGameMode(mode) {
+      const prev = gameMode;
+      gameMode = mode === 'online_duel' ? 'online_duel' : (mode === 'pve_local' ? 'pve_local' : 'pvp_local');
+      if (gameMode !== 'pve_local') aiThinking = false;
+      if (prev === 'online_duel' && gameMode !== 'online_duel') {
+        closeOnlineSocket();
+      }
+      modeSelect.value = gameMode;
+      refreshHud();
+      maybeRunAiTurn();
+    }
+
+    function refreshHud() {
+      playerText.textContent = 'Player ' + PLAYER_MARKS[currentPlayer];
+      phaseText.textContent = phase === 'gameover' ? 'Finished' : (phase === 'mark' ? 'Mark' : 'Rotate');
+      axisText.textContent = selectedAxis.toUpperCase() + ' / ' + (selectedLayer + 1);
+      aiStatusText.textContent = gameMode === 'pvp_local' || gameMode === 'online_duel'
+        ? 'Disabled'
+        : (aiThinking ? 'Thinking...' : (isAiTurn() ? 'Ready' : 'Idle'));
+      onlineStatusText.textContent = !isOnlineMode()
+        ? 'Offline'
+        : (onlineConnected ? ('Connected (You: ' + (mySlot === 0 ? 'X' : mySlot === 1 ? 'O' : '?') + ')') : 'Connecting...');
+      createRoomBtn.disabled = rotating || aiThinking;
+      skipRotateBtn.disabled = isHumanInputLocked() || phase !== 'rotate';
+      updateRotationButtonsVisual();
+      updateLayerIndicator();
+    }
+
+    function highlightLayer(coord) {
+      for (const s of stickers) {
+        const inLayer = s.cubie[selectedAxis] === coord;
+        s.mesh.material.emissive.setHex(inLayer && phase === 'rotate' ? 0x264d8a : 0x000000);
+        s.mesh.material.emissiveIntensity = inLayer && phase === 'rotate' ? 0.33 : 0;
+      }
+    }
+
+    function clearLayerHighlight() {
+      for (const s of stickers) {
+        s.mesh.material.emissive.setHex(0x000000);
+        s.mesh.material.emissiveIntensity = 0;
+      }
+    }
+
+    function getStickerById(id) {
+      return stickers.find(s => s.id === id);
+    }
+
+    function checkFourConsecutiveOnFace(faceGrid, mark) {
+      const dirs = [
+        [0, 1],  // row
+        [1, 0],  // column
+        [1, 1],  // diag down-right
+        [1, -1]  // diag down-left
+      ];
+      for (let r = 0; r < N; r++) {
+        for (let c = 0; c < N; c++) {
+          for (const [dr, dc] of dirs) {
+            let ok = true;
+            for (let k = 0; k < 4; k++) {
+              const rr = r + dr * k;
+              const cc = c + dc * k;
+              if (rr < 0 || rr >= N || cc < 0 || cc >= N || !faceGrid[rr][cc] || faceGrid[rr][cc].mark !== mark) {
+                ok = false;
+                break;
+              }
+            }
+            if (ok) return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function detectMarkWin(mark) {
+      for (const face of FACE_NAMES) {
+        if (checkFourConsecutiveOnFace(faceGrids[face], mark)) return true;
+      }
+      return false;
+    }
+
+    function detectColorFaceWin() {
+      for (const face of FACE_NAMES) {
+        const grid = faceGrids[face];
+        const base = grid[0][0]?.colorIndex;
+        if (base === undefined || base === null) continue;
+        let all = true;
+        for (let r = 0; r < N; r++) {
+          for (let c = 0; c < N; c++) {
+            if (!grid[r][c] || grid[r][c].colorIndex !== base) {
+              all = false;
+              break;
+            }
+          }
+          if (!all) break;
+        }
+        if (all) return true;
+      }
+      return false;
+    }
+
+    function isBoardFull() {
+      return stickers.every(s => s.mark !== null);
+    }
+
+    function evaluateEndState(activePlayer, actionLabel) {
+      rebuildFaceGrids();
+      const activeMark = PLAYER_MARKS[activePlayer];
+      const opponentPlayer = activePlayer === 0 ? 1 : 0;
+      const opponentMark = PLAYER_MARKS[opponentPlayer];
+      const activeLine = detectMarkWin(activeMark);
+      const oppLine = detectMarkWin(opponentMark);
+      const colorWin = detectColorFaceWin();
+      const activeAnyWin = activeLine || colorWin;
+
+      if (activeAnyWin && oppLine) {
+        gameOver = true;
+        phase = 'gameover';
+        setMessage(
+          `Both players have a winning condition after ${actionLabel}. Active player (${activeMark}) wins by priority.`,
+          'win'
+        );
+        refreshHud();
+        return true;
+      }
+      if (activeAnyWin) {
+        gameOver = true;
+        phase = 'gameover';
+        const reason = activeLine && colorWin ? '4-in-a-row + color-face win' : (activeLine ? '4-in-a-row' : 'color-face win');
+        setMessage(`Player ${activeMark} wins (${reason})!`, 'win');
+        refreshHud();
+        return true;
+      }
+      if (oppLine) {
+        gameOver = true;
+        phase = 'gameover';
+        setMessage(`Player ${opponentMark} wins (opponent line completed by active move).`, 'lose');
+        refreshHud();
+        return true;
+      }
+      if (isBoardFull()) {
+        gameOver = true;
+        phase = 'gameover';
+        setMessage('Draw: board is full with no winner.', 'info');
+        refreshHud();
+        return true;
+      }
+      return false;
+    }
+
+    function performRotation(axis, layerCoord, dir, animate = true, onDone = null) {
+      if (rotating || gameOver) return;
+      rotating = true;
+      const moving = stickers.filter(s => s.cubie[axis] === layerCoord);
+      const movingCubies = cubies.filter(c => c.coord[axis] === layerCoord);
+      const pivot = new THREE.Group();
+      scene.add(pivot);
+      for (const s of moving) pivot.attach(s.mesh);
+      for (const c of movingCubies) pivot.attach(c.mesh);
+
+      const finish = () => {
+        for (const s of moving) scene.attach(s.mesh);
+        for (const c of movingCubies) scene.attach(c.mesh);
+        scene.remove(pivot);
+        for (const s of moving) {
+          s.cubie = rotateGridVector(s.cubie, axis, dir);
+          s.normal = rotateGridVector(s.normal, axis, dir);
+          setStickerTransform(s);
+        }
+        for (const c of movingCubies) {
+          c.coord = rotateGridVector(c.coord, axis, dir);
+          setCubieTransform(c);
+        }
+        rotating = false;
+        if (onDone) onDone();
+      };
+
+      if (!animate) {
+        const q = new THREE.Quaternion().setFromAxisAngle(axisVector(axis), dir * Math.PI / 2);
+        pivot.quaternion.premultiply(q);
+        finish();
+        return;
+      }
+
+      const start = performance.now();
+      const duration = 240;
+      const target = dir * Math.PI / 2;
+      function step(now) {
+        const t = Math.min((now - start) / duration, 1);
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        pivot.rotation.set(0, 0, 0);
+        if (axis === 'x') pivot.rotation.x = target * eased;
+        if (axis === 'y') pivot.rotation.y = target * eased;
+        if (axis === 'z') pivot.rotation.z = target * eased;
+        if (t < 1) {
+          requestAnimationFrame(step);
+        } else {
+          finish();
+        }
+      }
+      requestAnimationFrame(step);
+    }
+
+    function scrambleCube() {
+      for (let i = 0; i < SCRAMBLE_MOVES; i++) {
+        const axis = ['x', 'y', 'z'][Math.floor(Math.random() * 3)];
+        const layerCoord = Math.floor(Math.random() * N) - HALF;
+        const dir = Math.random() > 0.5 ? 1 : -1;
+        performRotation(axis, layerCoord, dir, false);
+      }
+      rebuildFaceGrids();
+    }
+
+    function rotateGridVectorInt(v, axis, dir) {
+      const d = dir > 0 ? 1 : -1;
+      if (axis === 'x') {
+        return d > 0 ? { x: v.x, y: -v.z, z: v.y } : { x: v.x, y: v.z, z: -v.y };
+      }
+      if (axis === 'y') {
+        return d > 0 ? { x: v.z, y: v.y, z: -v.x } : { x: -v.z, y: v.y, z: v.x };
+      }
+      return d > 0 ? { x: -v.y, y: v.x, z: v.z } : { x: v.y, y: -v.x, z: v.z };
+    }
+
+    function getFaceCellFromStateSticker(sticker) {
+      const { x, y, z } = sticker.cubie;
+      const n = sticker.normal;
+      if (n.z === 1) return { face: 'F', row: HALF - y, col: x + HALF };
+      if (n.z === -1) return { face: 'B', row: HALF - y, col: HALF - x };
+      if (n.x === 1) return { face: 'R', row: HALF - y, col: HALF - z };
+      if (n.x === -1) return { face: 'L', row: HALF - y, col: z + HALF };
+      if (n.y === 1) return { face: 'U', row: z + HALF, col: x + HALF };
+      return { face: 'D', row: HALF - z, col: x + HALF };
+    }
+
+    function makeFaceGridsFromState(state) {
+      const grids = { F: makeFaceGrid(), B: makeFaceGrid(), R: makeFaceGrid(), L: makeFaceGrid(), U: makeFaceGrid(), D: makeFaceGrid() };
+      for (const s of state.stickers) {
+        const { face, row, col } = getFaceCellFromStateSticker(s);
+        grids[face][row][col] = { colorIndex: s.colorIndex, mark: s.mark };
+      }
+      return grids;
+    }
+
+    function detectMarkWinOnGrids(grids, mark) {
+      for (const face of FACE_NAMES) {
+        if (checkFourConsecutiveOnFace(grids[face], mark)) return true;
+      }
+      return false;
+    }
+
+    function detectColorFaceWinOnGrids(grids) {
+      for (const face of FACE_NAMES) {
+        const grid = grids[face];
+        const base = grid[0][0]?.colorIndex;
+        if (base === undefined || base === null) continue;
+        let all = true;
+        for (let r = 0; r < N; r++) {
+          for (let c = 0; c < N; c++) {
+            if (!grid[r][c] || grid[r][c].colorIndex !== base) {
+              all = false;
+              break;
+            }
+          }
+          if (!all) break;
+        }
+        if (all) return true;
+      }
+      return false;
+    }
+
+    function isStateBoardFull(state) {
+      return state.stickers.every(s => s.mark !== null);
+    }
+
+    function evaluateStateAfterAction(state, activePlayer) {
+      const grids = makeFaceGridsFromState(state);
+      const activeMark = PLAYER_MARKS[activePlayer];
+      const opponentPlayer = oppositePlayer(activePlayer);
+      const opponentMark = PLAYER_MARKS[opponentPlayer];
+      const activeLine = detectMarkWinOnGrids(grids, activeMark);
+      const oppLine = detectMarkWinOnGrids(grids, opponentMark);
+      const colorWin = detectColorFaceWinOnGrids(grids);
+      const activeAnyWin = activeLine || colorWin;
+
+      if (activeAnyWin) return { done: true, winner: activePlayer, draw: false };
+      if (oppLine) return { done: true, winner: opponentPlayer, draw: false };
+      if (isStateBoardFull(state)) return { done: true, winner: null, draw: true };
+      return { done: false, winner: null, draw: false };
+    }
+
+    function cloneState(state) {
+      return {
+        currentPlayer: state.currentPlayer,
+        lastRotation: state.lastRotation ? {
+          byPlayer: state.lastRotation.byPlayer,
+          axis: state.lastRotation.axis,
+          layerCoord: state.lastRotation.layerCoord,
+          dir: state.lastRotation.dir
+        } : null,
+        stickers: state.stickers.map(s => ({
+          id: s.id,
+          colorIndex: s.colorIndex,
+          mark: s.mark,
+          cubie: { x: s.cubie.x, y: s.cubie.y, z: s.cubie.z },
+          normal: { x: s.normal.x, y: s.normal.y, z: s.normal.z }
+        }))
+      };
+    }
+
+    function applyRotationToState(state, axis, layerCoord, dir) {
+      for (const s of state.stickers) {
+        if (s.cubie[axis] !== layerCoord) continue;
+        s.cubie = rotateGridVectorInt(s.cubie, axis, dir);
+        s.normal = rotateGridVectorInt(s.normal, axis, dir);
+      }
+    }
+
+    function applyCompositeMoveToState(state, move) {
+      const activePlayer = state.currentPlayer;
+      const markSymbol = PLAYER_MARKS[activePlayer];
+      const target = state.stickers.find(s => s.id === move.markStickerId);
+      if (!target || target.mark !== null) return { done: true, winner: oppositePlayer(activePlayer), draw: false, illegal: true };
+      target.mark = markSymbol;
+      let result = evaluateStateAfterAction(state, activePlayer);
+      if (result.done) return result;
+
+      if (move.rotation && !move.rotation.skip) {
+        if (isReverseRotationForbiddenInState(state, activePlayer, move.rotation.axis, move.rotation.layerCoord, move.rotation.dir)) {
+          return { done: true, winner: oppositePlayer(activePlayer), draw: false, illegal: true };
+        }
+        applyRotationToState(state, move.rotation.axis, move.rotation.layerCoord, move.rotation.dir);
+        state.lastRotation = {
+          byPlayer: activePlayer,
+          axis: move.rotation.axis,
+          layerCoord: move.rotation.layerCoord,
+          dir: move.rotation.dir
+        };
+        result = evaluateStateAfterAction(state, activePlayer);
+        if (result.done) return result;
+      }
+
+      state.currentPlayer = oppositePlayer(state.currentPlayer);
+      return { done: false, winner: null, draw: false };
+    }
+
+    function getAllRotationOptions() {
+      const options = [{ skip: true }];
+      for (const axis of ['x', 'y', 'z']) {
+        for (let layerCoord = -HALF; layerCoord <= HALF; layerCoord++) {
+          options.push({ axis, layerCoord, dir: 1 });
+          options.push({ axis, layerCoord, dir: -1 });
+        }
+      }
+      return options;
+    }
+
+    const ALL_ROTATION_OPTIONS = getAllRotationOptions();
+
+    function generateCandidateMoves(state, markLimit = 12, rotationLimit = 7) {
+      const emptyIds = state.stickers.filter(s => s.mark === null).map(s => s.id);
+      if (emptyIds.length === 0) return [];
+      const markIds = sampleWithoutReplacement(emptyIds, Math.min(markLimit, emptyIds.length));
+      const sampledRotations = [{ skip: true }].concat(sampleWithoutReplacement(ALL_ROTATION_OPTIONS.slice(1), Math.max(0, rotationLimit - 1)));
+      const moves = [];
+      for (const id of markIds) {
+        for (const rot of sampledRotations) {
+          if (!rot.skip && isReverseRotationForbiddenInState(state, state.currentPlayer, rot.axis, rot.layerCoord, rot.dir)) continue;
+          moves.push({
+            markStickerId: id,
+            rotation: rot.skip ? { skip: true } : { axis: rot.axis, layerCoord: rot.layerCoord, dir: rot.dir }
+          });
+        }
+      }
+      return moves;
+    }
+
+    function randomPolicyMove(state) {
+      const empties = state.stickers.filter(s => s.mark === null);
+      if (empties.length === 0) return null;
+      const markStickerId = randomChoice(empties).id;
+      const rot = randomChoice(ALL_ROTATION_OPTIONS);
+      return {
+        markStickerId,
+        rotation: rot.skip ? { skip: true } : { axis: rot.axis, layerCoord: rot.layerCoord, dir: rot.dir }
+      };
+    }
+
+    function mctsUtilityForAi(result) {
+      if (result.draw) return 0;
+      if (result.winner === aiPlayer) return 1;
+      if (result.winner === humanPlayer) return -1;
+      return 0;
+    }
+
+    function computeBestMoveMcts(rootState, budgetMs) {
+      const transposition = new Map();
+
+      function hashState(state) {
+        const markBits = [];
+        for (const s of state.stickers) {
+          const m = s.mark === null ? '_' : s.mark;
+          markBits.push(m + s.cubie.x + s.cubie.y + s.cubie.z + s.normal.x + s.normal.y + s.normal.z);
+        }
+        return state.currentPlayer + '|' + markBits.join('');
+      }
+
+      function movePrior(move) {
+        const rot = move.rotation || { skip: true };
+        const skipWeight = rot.skip ? 1.0 : 1.15;
+        return skipWeight;
+      }
+
+      function allLegalMoves(state) {
+        const emptyIds = state.stickers.filter(s => s.mark === null).map(s => s.id);
+        const moves = [];
+        for (const id of emptyIds) {
+          for (const rot of ALL_ROTATION_OPTIONS) {
+            if (!rot.skip && isReverseRotationForbiddenInState(state, state.currentPlayer, rot.axis, rot.layerCoord, rot.dir)) continue;
+            moves.push({
+              markStickerId: id,
+              rotation: rot.skip ? { skip: true } : { axis: rot.axis, layerCoord: rot.layerCoord, dir: rot.dir }
+            });
+          }
+        }
+        return moves;
+      }
+
+      function weightedRandomMove(state) {
+        const legal = allLegalMoves(state);
+        if (legal.length === 0) return null;
+        return randomChoice(legal);
+      }
+
+      function makeNode(state, parent = null, move = null) {
+        const h = hashState(state);
+        const entry = transposition.get(h) || { visits: 0, value: 0 };
+        transposition.set(h, entry);
+        return {
+          state,
+          parent,
+          move,
+          children: [],
+          visits: 0,
+          score: 0,
+          terminal: null,
+          legalMoves: null,
+          expandedCount: 0,
+          hash: h
+        };
+      }
+
+      function canExpand(node) {
+        if (node.terminal) return false;
+        if (!node.legalMoves) {
+          node.legalMoves = allLegalMoves(node.state);
+          for (let i = node.legalMoves.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const t = node.legalMoves[i];
+            node.legalMoves[i] = node.legalMoves[j];
+            node.legalMoves[j] = t;
+          }
+        }
+        const maxChildren = Math.max(1, Math.floor(1.8 * Math.pow(node.visits + 1, 0.55)));
+        return node.expandedCount < node.legalMoves.length && node.children.length < maxChildren;
+      }
+
+      function expand(node) {
+        const action = node.legalMoves[node.expandedCount++];
+        const nextState = cloneState(node.state);
+        const result = applyCompositeMoveToState(nextState, action);
+        const child = makeNode(nextState, node, action);
+        if (result.done) child.terminal = result;
+        node.children.push(child);
+        return child;
+      }
+
+      function bestUctChild(node) {
+        let best = null;
+        let bestScore = -Infinity;
+        const exploreBase = 1.15 + 0.65 / Math.sqrt(1 + node.visits);
+        for (const child of node.children) {
+          const exploit = child.score / (child.visits || 1);
+          const prior = movePrior(child.move);
+          const explore = exploreBase * prior * Math.sqrt(Math.log(node.visits + 1) / (child.visits || 1));
+          const uct = exploit + explore;
+          if (uct > bestScore) {
+            bestScore = uct;
+            best = child;
+          }
+        }
+        return best;
+      }
+
+      function rollout(fromState) {
+        const s = cloneState(fromState);
+        for (let depth = 0; depth < 18; depth++) {
+          const move = weightedRandomMove(s);
+          if (!move) return 0;
+          const result = applyCompositeMoveToState(s, move);
+          if (result.done) return mctsUtilityForAi(result);
+        }
+        return 0;
+      }
+
+      const root = makeNode(cloneState(rootState));
+      const started = performance.now();
+      let iters = 0;
+      while (performance.now() - started < budgetMs) {
+        iters += 1;
+        let node = root;
+
+        while (!node.terminal && !canExpand(node) && node.children.length > 0) {
+          node = bestUctChild(node);
+        }
+        if (!node.terminal && canExpand(node)) {
+          node = expand(node);
+        }
+
+        const value = node.terminal ? mctsUtilityForAi(node.terminal) : rollout(node.state);
+        while (node) {
+          node.visits += 1;
+          node.score += value;
+          const tr = transposition.get(node.hash);
+          tr.visits += 1;
+          tr.value += value;
+          node = node.parent;
+        }
+      }
+
+      let best = null;
+      let bestVisits = -1;
+      let bestMean = -Infinity;
+      for (const child of root.children) {
+        const mean = child.score / (child.visits || 1);
+        if (child.visits > bestVisits || (child.visits === bestVisits && mean > bestMean)) {
+          bestVisits = child.visits;
+          bestMean = mean;
+          best = child;
+        }
+      }
+      return best ? best.move : weightedRandomMove(rootState);
+    }
+
+    function buildSimulationStateFromLive() {
+      return {
+        currentPlayer,
+        lastRotation: lastRotation ? {
+          byPlayer: lastRotation.byPlayer,
+          axis: lastRotation.axis,
+          layerCoord: lastRotation.layerCoord,
+          dir: lastRotation.dir
+        } : null,
+        stickers: stickers.map(s => ({
+          id: s.id,
+          colorIndex: s.colorIndex,
+          mark: s.mark,
+          cubie: { x: s.cubie.x, y: s.cubie.y, z: s.cubie.z },
+          normal: { x: s.normal.x, y: s.normal.y, z: s.normal.z }
+        }))
+      };
+    }
+
+    function finalizeTurnAndMaybeTriggerAi(text) {
+      phase = 'mark';
+      hoveredLayerCoord = null;
+      clearLayerHighlight();
+      switchPlayer();
+      setMessage(text, 'info');
+      refreshHud();
+      maybeRunAiTurn();
+    }
+
+    function executeAiMove(move) {
+      if (!move || !isAiTurn() || gameOver) {
+        aiThinking = false;
+        refreshHud();
+        return;
+      }
+      let sticker = getStickerById(move.markStickerId);
+      if (!sticker || sticker.mark !== null) {
+        sticker = stickers.find(s => s.mark === null) || null;
+      }
+      if (!sticker) {
+        aiThinking = false;
+        refreshHud();
+        return;
+      }
+
+      sticker.mark = PLAYER_MARKS[currentPlayer];
+      createMarkOverlay(sticker, sticker.mark);
+      let ended = evaluateEndState(currentPlayer, 'mark');
+      if (ended) {
+        aiThinking = false;
+        refreshHud();
+        return;
+      }
+
+      phase = 'rotate';
+      refreshHud();
+      const rot = move.rotation || { skip: true };
+      if (rot.skip) {
+        aiThinking = false;
+        finalizeTurnAndMaybeTriggerAi('AI skipped rotation. Your turn to place a mark.');
+        return;
+      }
+      if (isReverseRotationForbiddenLive(rot.axis, rot.layerCoord, rot.dir, currentPlayer)) {
+        aiThinking = false;
+        finalizeTurnAndMaybeTriggerAi("AI cannot reverse your most recent rotation, so it skipped.");
+        return;
+      }
+
+      selectedAxis = rot.axis;
+      selectedLayer = coordToLayerIndex(rot.layerCoord);
+      hoveredLayerCoord = rot.layerCoord;
+      performRotation(rot.axis, rot.layerCoord, rot.dir, true, () => {
+        lastRotation = { byPlayer: currentPlayer, axis: rot.axis, layerCoord: rot.layerCoord, dir: rot.dir };
+        ended = evaluateEndState(currentPlayer, 'rotation');
+        aiThinking = false;
+        if (ended) {
+          refreshHud();
+          return;
+        }
+        finalizeTurnAndMaybeTriggerAi('AI moved. Your turn to place a mark.');
+      });
+    }
+
+    function maybeRunAiTurn() {
+      if (!isAiTurn() || gameOver || phase !== 'mark' || rotating || aiThinking) return;
+      aiThinking = true;
+      setMessage('AI thinking...', 'info');
+      refreshHud();
+      setTimeout(() => {
+        if (!isAiTurn() || gameOver || phase !== 'mark') {
+          aiThinking = false;
+          refreshHud();
+          return;
+        }
+        const state = buildSimulationStateFromLive();
+        const move = computeBestMoveMcts(state, mctsTimeBudgetMs);
+        executeAiMove(move);
+      }, 20);
+    }
+
+    function clearAllOverlays() {
+      for (const s of stickers) {
+        if (!s.overlay) continue;
+        s.mesh.remove(s.overlay);
+        s.overlay.material.map.dispose();
+        s.overlay.material.dispose();
+        s.overlay.geometry.dispose();
+        s.overlay = null;
+      }
+    }
+
+    function colorHexFromIndex(idx) {
+      const face = FACE_NAMES[idx] || 'F';
+      return FACE_COLOR_HEX[face];
+    }
+
+    function applyServerSnapshot(game) {
+      if (!game || !Array.isArray(game.stickers)) return;
+      const byId = new Map();
+      for (const ss of game.stickers) byId.set(ss.id, ss);
+      clearAllOverlays();
+      for (const local of stickers) {
+        const remote = byId.get(local.id);
+        if (!remote) continue;
+        local.colorIndex = remote.colorIndex;
+        local.mark = remote.mark;
+        local.cubie = { x: remote.cubie.x, y: remote.cubie.y, z: remote.cubie.z };
+        local.normal = { x: remote.normal.x, y: remote.normal.y, z: remote.normal.z };
+        local.mesh.material.color.setHex(colorHexFromIndex(local.colorIndex));
+        setStickerTransform(local);
+        if (local.mark) createMarkOverlay(local, local.mark);
+      }
+      currentPlayer = game.current_player;
+      phase = game.phase;
+      gameOver = !!game.game_over;
+      lastRotation = game.last_rotation
+        ? {
+            byPlayer: game.last_rotation.by_player,
+            axis: game.last_rotation.axis,
+            layerCoord: game.last_rotation.layer_coord,
+            dir: game.last_rotation.dir
+          }
+        : null;
+      rebuildFaceGrids();
+      refreshHud();
+      if (gameOver) {
+        if (game.winner === null || game.winner === undefined) {
+          setMessage('Online game draw.', 'info');
+        } else {
+          setMessage('Online winner: Player ' + PLAYER_MARKS[game.winner] + ' (' + (game.reason || 'win') + ')', 'win');
+        }
+      }
+    }
+
+    function wsUrlForRoom(targetRoomId, token, playerName) {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const q = new URLSearchParams();
+      q.set('token', token);
+      q.set('player_name', playerName || 'Player');
+      return proto + '://' + window.location.host + '/ws/rooms/' + encodeURIComponent(targetRoomId) + '?' + q.toString();
+    }
+
+    function closeOnlineSocket() {
+      if (ws) {
+        try { ws.close(); } catch (_) {}
+      }
+      ws = null;
+      onlineConnected = false;
+      mySlot = null;
+      refreshHud();
+    }
+
+    function connectOnlineRoom(targetRoomId, token, playerName) {
+      roomId = targetRoomId;
+      inviteToken = token;
+      closeOnlineSocket();
+      ws = new WebSocket(wsUrlForRoom(targetRoomId, token, playerName));
+      ws.onopen = () => {
+        onlineConnected = true;
+        ws.send(JSON.stringify({ type: 'join' }));
+        refreshHud();
+      };
+      ws.onclose = () => {
+        onlineConnected = false;
+        refreshHud();
+      };
+      ws.onerror = () => {
+        onlineConnected = false;
+        refreshHud();
+      };
+      ws.onmessage = (event) => {
+        let msg = null;
+        try { msg = JSON.parse(event.data); } catch (_) { return; }
+        if (!msg || !msg.type) return;
+        if (msg.type === 'joined') {
+          mySlot = msg.slot;
+          refreshHud();
+          return;
+        }
+        if (msg.type === 'state_snapshot') {
+          applyServerSnapshot(msg.game);
+          return;
+        }
+        if (msg.type === 'rematch_pending') {
+          setMessage(msg.message || 'Waiting for opponent response...', 'info');
+          return;
+        }
+        if (msg.type === 'rematch_request') {
+          const fromName = msg.from_name || ('Player ' + ((msg.from_slot ?? 0) + 1));
+          const accepted = window.confirm(fromName + ' requests a new game. Accept?');
+          sendOnline({ type: 'new_game_response', accepted });
+          if (!accepted) setMessage('You declined rematch. Continue current game.', 'info');
+          return;
+        }
+        if (msg.type === 'rematch_result') {
+          setMessage(msg.message || (msg.accepted ? 'Rematch accepted.' : 'Rematch declined.'), msg.accepted ? 'win' : 'info');
+          return;
+        }
+        if (msg.type === 'turn_update') {
+          if (typeof msg.current_player === 'number') currentPlayer = msg.current_player;
+          if (typeof msg.phase === 'string') phase = msg.phase;
+          refreshHud();
+          return;
+        }
+        if (msg.type === 'game_over') {
+          gameOver = true;
+          phase = 'gameover';
+          if (msg.draw) {
+            setMessage('Online duel ended in draw.', 'info');
+          } else {
+            setMessage('Online winner: Player ' + (msg.winner_mark || '?') + '.', 'win');
+          }
+          refreshHud();
+          return;
+        }
+        if (msg.type === 'error') {
+          setMessage('Online error: ' + msg.message, 'lose');
+          return;
+        }
+      };
+    }
+
+    async function createOnlineInvite() {
+      const name = window.prompt('Your player name:', 'Host') || 'Host';
+      const res = await fetch('/api/rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ player_name: name })
+      });
+      if (!res.ok) throw new Error('Room creation failed');
+      const data = await res.json();
+      const absInvite = new URL(data.invite_url, window.location.origin).toString();
+      inviteText.textContent = 'Invite: ' + absInvite;
+      roomId = data.room_id;
+      inviteToken = data.invite_token;
+      const u = new URL(window.location.href);
+      u.searchParams.set('mode', 'online_duel');
+      u.searchParams.set('room_id', roomId);
+      u.searchParams.set('token', inviteToken);
+      window.history.replaceState({}, '', u.toString());
+      setGameMode('online_duel');
+      connectOnlineRoom(roomId, inviteToken, name);
+      try { await navigator.clipboard.writeText(absInvite); } catch (_) {}
+      setMessage('Online room created. Invite link copied (if clipboard allowed).', 'info');
+    }
+
+    function sendOnline(action) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        setMessage('Online connection is not ready.', 'lose');
+        return;
+      }
+      ws.send(JSON.stringify(action));
+    }
+
+    function switchPlayer() {
+      currentPlayer = oppositePlayer(currentPlayer);
+    }
+
+    function skipRotation() {
+      if (phase !== 'rotate' || isHumanInputLocked()) return;
+      if (isOnlineMode()) {
+        sendOnline({ type: 'skip_rotation' });
+        return;
+      }
+      finalizeTurnAndMaybeTriggerAi('Rotation skipped. Next player: place a mark.');
+    }
+
+    function beginNewGame() {
+      if (isOnlineMode()) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          sendOnline({ type: 'request_new_game' });
+          setMessage('Rematch requested. Waiting for opponent response.', 'info');
+        } else {
+          setMessage('Online mode: connect to a room first.', 'info');
+        }
+        return;
+      }
+      clearBoardMeshes();
+      buildStickersFromSolvedCube();
+      scrambleCube();
+      currentPlayer = 0;
+      phase = 'mark';
+      gameOver = false;
+      aiThinking = false;
+      lastRotation = null;
+      hoveredLayerCoord = null;
+      selectedLayer = 2;
+      selectedAxis = getCurrentViewAxis();
+      buildRotationButtons();
+      rebuildFaceGrids();
+      refreshHud();
+      setMessage('New game started. Player X marks first.', 'info');
+      maybeRunAiTurn();
+    }
+
+    function tryMarkSticker(sticker) {
+      if (!sticker || phase !== 'mark' || isHumanInputLocked()) return;
+      if (sticker.mark !== null) return;
+      if (isOnlineMode()) {
+        sendOnline({ type: 'make_mark', sticker_id: sticker.id });
+        return;
+      }
+      sticker.mark = PLAYER_MARKS[currentPlayer];
+      createMarkOverlay(sticker, sticker.mark);
+      const ended = evaluateEndState(currentPlayer, 'mark');
+      if (ended) return;
+      phase = 'rotate';
+      setMessage('Mark placed. Rotate one layer or skip.', 'info');
+      refreshHud();
+    }
+
+    function rotateFromInput(dir) {
+      if (phase !== 'rotate' || isHumanInputLocked()) return;
+      const layerCoord = hoveredLayerCoord !== null ? hoveredLayerCoord : layerIndexToCoord(selectedLayer);
+      if (isReverseRotationForbiddenLive(selectedAxis, layerCoord, dir, currentPlayer)) {
+        setMessage("Illegal move: you cannot reverse opponent's most recent rotation.", 'lose');
+        return;
+      }
+      if (isOnlineMode()) {
+        sendOnline({ type: 'rotate_layer', axis: selectedAxis, layer_coord: layerCoord, dir });
+        return;
+      }
+      performRotation(selectedAxis, layerCoord, dir, true, () => {
+        lastRotation = { byPlayer: currentPlayer, axis: selectedAxis, layerCoord, dir };
+        const ended = evaluateEndState(currentPlayer, 'rotation');
+        if (ended) return;
+        finalizeTurnAndMaybeTriggerAi('Rotation finished. Next player: place a mark.');
+      });
+    }
+
+    function onPointerMove(event) {
+      if (gameOver || phase !== 'rotate' || rotating || aiThinking || isAiTurn() || (isOnlineMode() && !isMyTurnOnline())) {
+        hoveredLayerCoord = null;
+        clearLayerHighlight();
+        updateLayerIndicator();
+        return;
+      }
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const hit = raycaster.intersectObjects(stickers.map(s => s.mesh), false)[0];
+      if (!hit) {
+        hoveredLayerCoord = null;
+        clearLayerHighlight();
+      } else {
+        const s = getStickerById(hit.object.userData.stickerId);
+        hoveredLayerCoord = s.cubie[selectedAxis];
+        selectedLayer = coordToLayerIndex(hoveredLayerCoord);
+        highlightLayer(hoveredLayerCoord);
+      }
+      refreshHud();
+    }
+
+    function onPointerDown(event) {
+      if (isHumanInputLocked()) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, camera);
+      const stickerMeshes = stickers.map(s => s.mesh);
+      const rotMeshes = rotationButtons.map(b => b.sprite);
+      const allHits = raycaster.intersectObjects(stickerMeshes.concat(rotMeshes), false);
+      if (allHits.length === 0) return;
+      const target = allHits[0].object;
+      if (target.userData.type === 'sticker') {
+        const sticker = getStickerById(target.userData.stickerId);
+        tryMarkSticker(sticker);
+        return;
+      }
+      if (target.userData.type === 'rotBtn' && phase === 'rotate' && !isHumanInputLocked()) {
+        selectedLayer = target.userData.layerIndex;
+        hoveredLayerCoord = target.userData.layerCoord;
+        refreshHud();
+        rotateFromInput(target.userData.dir);
+      }
+    }
+
+    function onKeyDown(event) {
+      if (isHumanInputLocked()) return;
+      if (phase === 'rotate') {
+        if (event.key >= '1' && event.key <= '5') {
+          selectedLayer = Number(event.key) - 1;
+          hoveredLayerCoord = layerIndexToCoord(selectedLayer);
+          highlightLayer(hoveredLayerCoord);
+          refreshHud();
+          return;
+        }
+        if (event.key === 'ArrowRight' || event.key.toLowerCase() === 'd') {
+          rotateFromInput(1);
+          return;
+        }
+        if (event.key === 'ArrowLeft' || event.key.toLowerCase() === 'a') {
+          rotateFromInput(-1);
+          return;
+        }
+        if (event.key === 'Enter') {
+          skipRotation();
+        }
+      }
+    }
+
+    renderer.domElement.addEventListener('pointermove', onPointerMove);
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    controls.addEventListener('change', () => {
+      updateSelectedAxisFromCamera();
+      updateLayerIndicator();
+    });
+    skipRotateBtn.addEventListener('click', skipRotation);
+    newGameBtn.addEventListener('click', beginNewGame);
+    createRoomBtn.addEventListener('click', async () => {
+      try {
+        await createOnlineInvite();
+      } catch (err) {
+        setMessage('Create room failed: ' + (err && err.message ? err.message : String(err)), 'lose');
+      }
+    });
+    modeSelect.addEventListener('change', () => {
+      setGameMode(modeSelect.value);
+      if (gameMode === 'pvp_local') setMessage('PvP local mode selected.', 'info');
+      else if (gameMode === 'pve_local') setMessage('PvE local mode selected. Human is X, AI is O.', 'info');
+      else setMessage('Online duel mode selected. Create or join a room.', 'info');
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      updateSelectedAxisFromCamera();
+      renderer.render(scene, camera);
+    }
+
+      beginNewGame();
+      const params = new URLSearchParams(window.location.search);
+      const modeParam = params.get('mode');
+      const qRoom = params.get('room_id');
+      const qToken = params.get('token');
+      if (modeParam === 'online_duel' && qRoom && qToken) {
+        setGameMode('online_duel');
+        inviteText.textContent = 'Joined via invite for room ' + qRoom + '.';
+        const playerName = window.prompt('Your player name:', 'Guest') || 'Guest';
+        connectOnlineRoom(qRoom, qToken, playerName);
+      } else {
+        setGameMode(modeSelect.value);
+      }
+      animate();
+    }
+
+    init().catch(showBootError);
+  </script>
+</body>
+</html>
