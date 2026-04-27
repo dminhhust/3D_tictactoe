@@ -1,62 +1,44 @@
-# API Document (FastAPI + WebSocket)
+# API Document (Backend-Authoritative)
 
-Base app file: `D:\self_study\3D_tictactoe\backend\app.py`  
-Authoritative rules: `D:\self_study\3D_tictactoe\backend\game_logic.py`
+Base server: `D:\self_study\3D_tictactoe\backend\app.py`  
+Game engine: `D:\self_study\3D_tictactoe\backend\game_logic.py`  
+AI engine: `D:\self_study\3D_tictactoe\backend\ai_mcts.py`
 
-## HTTP API
+## HTTP
 
-### `POST /api/rooms`
-Create online duel room.
+### Rooms (online duel)
+- `POST /api/rooms` -> create invite room
+- `GET /invite/{room_id}/{invite_token}` -> redirect to game URL with query params
+- `GET /api/rooms/{room_id}?token=...` -> room metadata + authoritative snapshot
 
-Request:
+### Sessions (local modes via backend)
+- `POST /api/sessions`
+  - body: `{"mode":"pvp_local"|"pve_local","player_name":"Player"}`
+  - response: `{"session_id","mode","socket_url"}`
+- `GET /api/sessions/{session_id}` -> session metadata + snapshot
+- `DELETE /api/sessions/{session_id}` -> cleanup
 
-```json
-{
-  "player_name": "Host"
-}
-```
+## WebSocket
 
-Response:
+### Online duel
+- `GET /ws/rooms/{room_id}?token=...&player_name=...`
 
-```json
-{
-  "room_id": "a1b2c3d4e5",
-  "invite_token": "token-value",
-  "invite_url": "/invite/{room_id}/{invite_token}",
-  "host_slot": 0
-}
-```
+### Local backend sessions
+- `GET /ws/sessions/{session_id}?player_name=...`
 
-### `GET /invite/{room_id}/{invite_token}`
-Validates invite and redirects to:
+## Shared WS command contract
 
-`/?mode=online_duel&room_id={room_id}&token={invite_token}`
+### Client -> Server
+- `join`
+- `sync_request`
+- `make_mark` with `sticker_id`
+- `rotate_layer` with `axis`, `layer_coord`, `dir`
+- `skip_rotation`
+- `request_new_game`
+- `new_game_response` with `accepted` (required for online duel rematch)
+- `leave`
 
-### `GET /api/rooms/{room_id}?token=...`
-Returns room metadata + authoritative game snapshot.
-
-## WebSocket API
-
-### `GET /ws/rooms/{room_id}?token=...&player_name=...`
-
-Server emits on connect:
-- `joined`
-- `state_snapshot`
-- `turn_update`
-
-### Client -> Server messages
-
-- `{"type":"join"}`
-- `{"type":"sync_request"}`
-- `{"type":"make_mark","sticker_id":123}`
-- `{"type":"rotate_layer","axis":"x|y|z","layer_coord":-2..2,"dir":-1|1}`
-- `{"type":"skip_rotation"}`
-- `{"type":"request_new_game"}`
-- `{"type":"new_game_response","accepted":true|false}`
-- `{"type":"leave"}`
-
-### Server -> Client messages
-
+### Server -> Client
 - `joined`
 - `state_snapshot`
 - `turn_update`
@@ -68,23 +50,26 @@ Server emits on connect:
 - `peer_left`
 - `error`
 
-## `state_snapshot` game payload
-
+## Snapshot payload (`state_snapshot.game`)
 - `current_player: 0|1`
-- `phase: "mark" | "rotate" | "gameover"`
+- `phase: "mark"|"rotate"|"gameover"`
 - `game_over: boolean`
-- `winner: number | null`
-- `winner_mark: "X" | "O" | null`
+- `winner: number|null`
+- `winner_mark: "X"|"O"|null`
 - `reason: string`
-- `last_rotation: {by_player,axis,layer_coord,dir} | null`
+- `last_rotation: {by_player,axis,layer_coord,dir}|null`
 - `stickers: Sticker[]`
 
 Sticker:
-- `id: number`
-- `colorIndex: number`
-- `mark: "X" | "O" | null`
-- `cubie: {x,y,z}`
-- `normal: {x,y,z}`
+- `id`
+- `colorIndex`
+- `mark`
+- `cubie {x,y,z}`
+- `normal {x,y,z}`
 
-Rule note:
-- A player cannot rotate a layer by the exact inverse of the opponent's most recent rotation (`same axis + same layer + opposite dir`).
+## Rules enforced server-side
+- Mark/rotate/skip phase order
+- Turn ownership
+- Win/draw resolution (including active-player priority edge case)
+- Reverse-rotation guard:
+  - A player cannot perform the exact inverse of opponent’s most recent rotation

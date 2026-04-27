@@ -13,10 +13,12 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.game_logic import evaluate_end_state, is_reverse_rotation_forbidden, new_solved_state, rotate_layer, scramble_state
+from backend.ai_mcts import compute_best_move_mcts
+from backend import game_logic as gl
 
 UTC = timezone.utc
 ROOM_TTL = timedelta(minutes=30)
+SESSION_TTL = timedelta(minutes=60)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -24,77 +26,204 @@ class CreateRoomRequest(BaseModel):
     player_name: str = "Host"
 
 
+class CreateSessionRequest(BaseModel):
+    mode: str
+    player_name: str = "Player"
+
+
 @dataclass
-class Room:
-    room_id: str
-    invite_token: str
+class Channel:
+    channel_id: str
+    kind: str  # room | session
+    mode: str  # online_duel | pvp_local | pve_local
     created_at: datetime
     last_active: datetime
     state: dict[str, Any]
+    invite_token: str | None = None
     participants: dict[int, dict[str, Any]] = field(default_factory=dict)
     sockets: dict[int, WebSocket] = field(default_factory=dict)
     rematch_requester: int | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-app = FastAPI(title="3D TicTacToe Online Server")
+app = FastAPI(title="3D TicTacToe Backend")
 app.mount("/static", StaticFiles(directory=PROJECT_ROOT), name="static")
-rooms: dict[str, Room] = {}
+rooms: dict[str, Channel] = {}
+sessions: dict[str, Channel] = {}
 
 
 def now_utc() -> datetime:
     return datetime.now(UTC)
 
 
-def prune_rooms() -> None:
-    cutoff = now_utc() - ROOM_TTL
-    stale = [rid for rid, room in rooms.items() if room.last_active < cutoff]
-    for rid in stale:
+def prune_channels() -> None:
+    room_cutoff = now_utc() - ROOM_TTL
+    session_cutoff = now_utc() - SESSION_TTL
+    for rid in [k for k, r in rooms.items() if r.last_active < room_cutoff]:
         rooms.pop(rid, None)
+    for sid in [k for k, s in sessions.items() if s.last_active < session_cutoff]:
+        sessions.pop(sid, None)
 
 
-def room_state_payload(room: Room) -> dict[str, Any]:
-    return {
-        "current_player": room.state["current_player"],
-        "phase": room.state["phase"],
-        "game_over": room.state["game_over"],
-        "winner": room.state["winner"],
-        "winner_mark": room.state["winner_mark"],
-        "reason": room.state["reason"],
-        "last_rotation": room.state.get("last_rotation"),
-        "stickers": room.state["stickers"],
-    }
+def serialize_participants(ch: Channel) -> list[dict[str, Any]]:
+    return [{"slot": s, "name": p["name"], "connected": p["connected"]} for s, p in sorted(ch.participants.items())]
 
 
-async def broadcast(room: Room, payload: dict[str, Any]) -> None:
+async def broadcast(ch: Channel, payload: dict[str, Any]) -> None:
     drop: list[int] = []
-    for slot, ws in room.sockets.items():
+    for slot, ws in ch.sockets.items():
         try:
             await ws.send_json(payload)
         except Exception:
             drop.append(slot)
     for slot in drop:
-        room.sockets.pop(slot, None)
-        if slot in room.participants:
-            room.participants[slot]["connected"] = False
+        ch.sockets.pop(slot, None)
+        if slot in ch.participants:
+            ch.participants[slot]["connected"] = False
 
 
-def assign_slot(room: Room, player_name: str) -> int | None:
-    # Reconnect by same name first.
-    for slot, p in room.participants.items():
+def validate_invite(ch: Channel, token: str) -> bool:
+    if not ch.invite_token:
+        return False
+    return secrets.compare_digest(ch.invite_token, token)
+
+
+def room_payload(ch: Channel) -> dict[str, Any]:
+    return {
+        "id": ch.channel_id,
+        "kind": ch.kind,
+        "mode": ch.mode,
+        "created_at": ch.created_at.isoformat(),
+        "last_active": ch.last_active.isoformat(),
+        "participants": serialize_participants(ch),
+        "game": gl.serialize_state(ch.state),
+    }
+
+
+def assign_room_slot(ch: Channel, player_name: str) -> int | None:
+    for slot, p in ch.participants.items():
         if p["name"] == player_name and not p["connected"]:
             return slot
     for slot in (0, 1):
-        if slot not in room.participants:
+        if slot not in ch.participants:
             return slot
-    for slot, p in room.participants.items():
+    for slot, p in ch.participants.items():
         if not p["connected"]:
             return slot
     return None
 
 
-def validate_invite(room: Room, token: str) -> bool:
-    return secrets.compare_digest(room.invite_token, token)
+def local_actor_for_action(ch: Channel, controller_slot: int) -> int:
+    # pvp_local and pve_local actions are driven by single controller socket.
+    # pvp_local: controller can act for current turn owner
+    # pve_local: human is slot 0 only; AI handled server-side
+    if ch.mode == "pvp_local":
+        return ch.state["current_player"]
+    if ch.mode == "pve_local":
+        return 0
+    return controller_slot
+
+
+async def emit_state(ch: Channel) -> None:
+    await broadcast(ch, {"type": "state_snapshot", "game": gl.serialize_state(ch.state)})
+    await broadcast(ch, {"type": "turn_update", "current_player": ch.state["current_player"], "phase": ch.state["phase"]})
+    if ch.state["game_over"]:
+        await broadcast(
+            ch,
+            {
+                "type": "game_over",
+                "winner": ch.state["winner"],
+                "winner_mark": ch.state["winner_mark"],
+                "reason": ch.state["reason"],
+                "draw": ch.state["winner"] is None,
+            },
+        )
+
+
+async def run_pve_ai_if_needed(ch: Channel) -> None:
+    # Only for local PvE session and only when it's AI turn at mark phase.
+    if ch.mode != "pve_local":
+        return
+    while not ch.state["game_over"] and ch.state["current_player"] == 1 and ch.state["phase"] == "mark":
+        mv = compute_best_move_mcts(gl.clone_state(ch.state), 1500)
+        if not mv:
+            break
+
+        mark = gl.apply_mark(ch.state, 1, int(mv["sticker_id"]))
+        if not mark["ok"]:
+            await broadcast(ch, {"type": "error", "message": "AI failed to make mark"})
+            break
+        await broadcast(ch, {"type": "move_applied", "action": {"type": "make_mark", "sticker_id": int(mv["sticker_id"])}, "by": "ai"})
+        if mark["done"]:
+            await emit_state(ch)
+            break
+
+        rot = mv.get("rotation")
+        if rot is None:
+            skip = gl.apply_skip_rotation(ch.state, 1)
+            if not skip["ok"]:
+                await broadcast(ch, {"type": "error", "message": "AI failed to skip rotation"})
+                break
+            await broadcast(ch, {"type": "move_applied", "action": {"type": "skip_rotation"}, "by": "ai"})
+        else:
+            rot_res = gl.apply_rotation(ch.state, 1, rot["axis"], int(rot["layer_coord"]), int(rot["dir"]))
+            if not rot_res["ok"]:
+                # fallback to skip to avoid deadlock
+                skip = gl.apply_skip_rotation(ch.state, 1)
+                if skip["ok"]:
+                    await broadcast(ch, {"type": "move_applied", "action": {"type": "skip_rotation"}, "by": "ai"})
+                else:
+                    await broadcast(ch, {"type": "error", "message": "AI failed to complete turn"})
+                    break
+            else:
+                await broadcast(
+                    ch,
+                    {
+                        "type": "move_applied",
+                        "action": {"type": "rotate_layer", "axis": rot["axis"], "layer_coord": int(rot["layer_coord"]), "dir": int(rot["dir"])},
+                        "by": "ai",
+                    },
+                )
+        await emit_state(ch)
+
+
+async def process_game_action(ch: Channel, mtype: str, msg: dict[str, Any], actor_slot: int, allow_controller: bool) -> tuple[bool, str | None]:
+    actor = local_actor_for_action(ch, actor_slot) if allow_controller else actor_slot
+    if mtype == "make_mark":
+        res = gl.apply_mark(ch.state, actor, int(msg.get("sticker_id")))
+        if not res["ok"]:
+            return False, res["error"]
+        await broadcast(ch, {"type": "move_applied", "action": {"type": "make_mark", "sticker_id": int(msg.get("sticker_id"))}, "by": actor})
+        await emit_state(ch)
+        await run_pve_ai_if_needed(ch)
+        return True, None
+
+    if mtype == "rotate_layer":
+        res = gl.apply_rotation(ch.state, actor, msg.get("axis"), int(msg.get("layer_coord")), int(msg.get("dir")))
+        if not res["ok"]:
+            return False, res["error"]
+        await broadcast(
+            ch,
+            {
+                "type": "move_applied",
+                "action": {"type": "rotate_layer", "axis": msg.get("axis"), "layer_coord": int(msg.get("layer_coord")), "dir": int(msg.get("dir"))},
+                "by": actor,
+            },
+        )
+        await emit_state(ch)
+        await run_pve_ai_if_needed(ch)
+        return True, None
+
+    if mtype == "skip_rotation":
+        res = gl.apply_skip_rotation(ch.state, actor)
+        if not res["ok"]:
+            return False, res["error"]
+        await broadcast(ch, {"type": "move_applied", "action": {"type": "skip_rotation"}, "by": actor})
+        await emit_state(ch)
+        await run_pve_ai_if_needed(ch)
+        return True, None
+
+    return False, "Unknown message type"
 
 
 @app.get("/")
@@ -103,325 +232,214 @@ async def index() -> FileResponse:
 
 
 @app.post("/api/rooms")
-async def create_room(req: CreateRoomRequest, websocket_base: str | None = None) -> dict[str, Any]:
-    prune_rooms()
-    room_id = uuid4().hex[:10]
+async def create_room(req: CreateRoomRequest) -> dict[str, Any]:
+    prune_channels()
+    rid = uuid4().hex[:10]
     token = secrets.token_urlsafe(16)
-    state = new_solved_state()
-    scramble_state(state, 25)
-    room = Room(
-        room_id=room_id,
-        invite_token=token,
+    ch = Channel(
+        channel_id=rid,
+        kind="room",
+        mode="online_duel",
         created_at=now_utc(),
         last_active=now_utc(),
-        state=state,
+        invite_token=token,
+        state=gl.create_initial_state(25),
     )
-    rooms[room_id] = room
-    room.participants[0] = {"name": req.player_name.strip() or "Host", "connected": False}
-    invite_path = f"/invite/{room_id}/{token}"
-    return {
-        "room_id": room_id,
-        "invite_token": token,
-        "invite_url": invite_path,
-        "host_slot": 0,
-    }
+    ch.participants[0] = {"name": req.player_name.strip() or "Host", "connected": False}
+    rooms[rid] = ch
+    return {"room_id": rid, "invite_token": token, "invite_url": f"/invite/{rid}/{token}", "host_slot": 0}
 
 
 @app.get("/invite/{room_id}/{invite_token}")
 async def invite_redirect(room_id: str, invite_token: str) -> RedirectResponse:
-    prune_rooms()
-    room = rooms.get(room_id)
-    if room is None or not validate_invite(room, invite_token):
+    prune_channels()
+    ch = rooms.get(room_id)
+    if ch is None or not validate_invite(ch, invite_token):
         raise HTTPException(status_code=404, detail="Invitation invalid or expired")
-    room.last_active = now_utc()
+    ch.last_active = now_utc()
     return RedirectResponse(url=f"/?mode=online_duel&room_id={room_id}&token={invite_token}")
 
 
 @app.get("/api/rooms/{room_id}")
 async def get_room(room_id: str, token: str = Query(...)) -> dict[str, Any]:
-    prune_rooms()
-    room = rooms.get(room_id)
-    if room is None or not validate_invite(room, token):
+    prune_channels()
+    ch = rooms.get(room_id)
+    if ch is None or not validate_invite(ch, token):
         raise HTTPException(status_code=404, detail="Room not found")
-    room.last_active = now_utc()
-    return {
-        "room_id": room.room_id,
-        "created_at": room.created_at.isoformat(),
-        "last_active": room.last_active.isoformat(),
-        "participants": [
-            {"slot": slot, "name": p["name"], "connected": p["connected"]}
-            for slot, p in sorted(room.participants.items())
-        ],
-        "game": room_state_payload(room),
-    }
+    ch.last_active = now_utc()
+    return room_payload(ch)
+
+
+@app.post("/api/sessions")
+async def create_session(req: CreateSessionRequest) -> dict[str, Any]:
+    prune_channels()
+    mode = req.mode if req.mode in {"pvp_local", "pve_local"} else "pvp_local"
+    sid = uuid4().hex[:12]
+    ch = Channel(
+        channel_id=sid,
+        kind="session",
+        mode=mode,
+        created_at=now_utc(),
+        last_active=now_utc(),
+        state=gl.create_initial_state(25),
+    )
+    ch.participants[0] = {"name": req.player_name.strip() or "Player", "connected": False}
+    sessions[sid] = ch
+    return {"session_id": sid, "mode": mode, "socket_url": f"/ws/sessions/{sid}"}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str) -> dict[str, Any]:
+    prune_channels()
+    ch = sessions.get(session_id)
+    if ch is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    ch.last_active = now_utc()
+    return room_payload(ch)
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str) -> dict[str, Any]:
+    existed = sessions.pop(session_id, None) is not None
+    return {"deleted": existed}
 
 
 @app.websocket("/ws/rooms/{room_id}")
-async def room_ws(
-    websocket: WebSocket,
-    room_id: str,
-    token: str = Query(...),
-    player_name: str = Query("Player"),
-) -> None:
-    prune_rooms()
-    room = rooms.get(room_id)
-    if room is None:
+async def ws_room(websocket: WebSocket, room_id: str, token: str = Query(...), player_name: str = Query("Player")) -> None:
+    prune_channels()
+    ch = rooms.get(room_id)
+    if ch is None:
         await websocket.close(code=4404, reason="Room not found")
         return
-    if not validate_invite(room, token):
+    if not validate_invite(ch, token):
         await websocket.close(code=4403, reason="Bad token")
         return
-
     await websocket.accept()
-    async with room.lock:
-        slot = assign_slot(room, (player_name or "Player").strip())
+
+    async with ch.lock:
+        slot = assign_room_slot(ch, (player_name or "Player").strip())
         if slot is None:
             await websocket.send_json({"type": "error", "message": "Room is full"})
             await websocket.close(code=4409, reason="Room full")
             return
-        room.participants[slot] = {"name": (player_name or f"Player {slot+1}").strip(), "connected": True}
-        room.sockets[slot] = websocket
-        room.last_active = now_utc()
-        await websocket.send_json(
-            {
-                "type": "joined",
-                "room_id": room.room_id,
-                "slot": slot,
-                "player_mark": "X" if slot == 0 else "O",
-                "participants": [
-                    {"slot": s, "name": p["name"], "connected": p["connected"]}
-                    for s, p in sorted(room.participants.items())
-                ],
-            }
-        )
-        await websocket.send_json({"type": "state_snapshot", "game": room_state_payload(room)})
-        await broadcast(
-            room,
-            {
-                "type": "turn_update",
-                "current_player": room.state["current_player"],
-                "phase": room.state["phase"],
-                "participants": [
-                    {"slot": s, "name": p["name"], "connected": p["connected"]}
-                    for s, p in sorted(room.participants.items())
-                ],
-            },
-        )
+        ch.participants[slot] = {"name": (player_name or f"Player {slot+1}").strip(), "connected": True}
+        ch.sockets[slot] = websocket
+        ch.last_active = now_utc()
+        await websocket.send_json({"type": "joined", "room_id": ch.channel_id, "slot": slot, "player_mark": gl.PLAYER_MARKS[slot], "participants": serialize_participants(ch)})
+        await websocket.send_json({"type": "state_snapshot", "game": gl.serialize_state(ch.state)})
+        await broadcast(ch, {"type": "turn_update", "current_player": ch.state["current_player"], "phase": ch.state["phase"], "participants": serialize_participants(ch)})
 
     try:
         while True:
             msg = await websocket.receive_json()
             mtype = msg.get("type")
-            async with room.lock:
-                room.last_active = now_utc()
+            async with ch.lock:
+                ch.last_active = now_utc()
                 if mtype == "sync_request":
-                    await websocket.send_json({"type": "state_snapshot", "game": room_state_payload(room)})
+                    await websocket.send_json({"type": "state_snapshot", "game": gl.serialize_state(ch.state)})
                     continue
                 if mtype == "leave":
                     break
                 if mtype == "join":
-                    await websocket.send_json({"type": "joined", "room_id": room.room_id, "slot": slot})
+                    await websocket.send_json({"type": "joined", "room_id": ch.channel_id, "slot": slot})
                     continue
                 if mtype == "request_new_game":
-                    if room.rematch_requester is not None:
+                    if ch.rematch_requester is not None:
                         await websocket.send_json({"type": "error", "message": "A rematch request is already pending"})
                         continue
-                    other_slot = 1 - slot
-                    other_ws = room.sockets.get(other_slot)
-                    if other_ws is None or other_slot not in room.participants or not room.participants[other_slot]["connected"]:
+                    other = 1 - slot
+                    if other not in ch.sockets:
                         await websocket.send_json({"type": "error", "message": "Opponent is not connected"})
                         continue
-                    room.rematch_requester = slot
+                    ch.rematch_requester = slot
                     await websocket.send_json({"type": "rematch_pending", "message": "Waiting for opponent response..."})
-                    await other_ws.send_json(
-                        {
-                            "type": "rematch_request",
-                            "from_slot": slot,
-                            "from_name": room.participants.get(slot, {}).get("name", f"Player {slot+1}"),
-                            "message": "Opponent requests a new game. Accept?",
-                        }
-                    )
+                    await ch.sockets[other].send_json({"type": "rematch_request", "from_slot": slot, "from_name": ch.participants.get(slot, {}).get("name", f"Player {slot+1}")})
                     continue
                 if mtype == "new_game_response":
-                    requester = room.rematch_requester
+                    requester = ch.rematch_requester
                     if requester is None:
                         await websocket.send_json({"type": "error", "message": "No pending rematch request"})
                         continue
                     responder = 1 - requester
                     if slot != responder:
-                        await websocket.send_json({"type": "error", "message": "Only the opponent can answer this rematch request"})
+                        await websocket.send_json({"type": "error", "message": "Only opponent can answer rematch request"})
                         continue
                     accepted = bool(msg.get("accepted"))
-                    room.rematch_requester = None
+                    ch.rematch_requester = None
                     if not accepted:
-                        await broadcast(
-                            room,
-                            {
-                                "type": "rematch_result",
-                                "accepted": False,
-                                "by_slot": slot,
-                                "message": "Rematch declined. Continue current game.",
-                            },
-                        )
+                        await broadcast(ch, {"type": "rematch_result", "accepted": False, "message": "Rematch declined. Continue current game."})
                         continue
-                    room.state = new_solved_state()
-                    scramble_state(room.state, 25)
-                    await broadcast(
-                        room,
-                        {
-                            "type": "rematch_result",
-                            "accepted": True,
-                            "by_slot": slot,
-                            "message": "Rematch accepted. New game started.",
-                        },
-                    )
-                    await broadcast(room, {"type": "state_snapshot", "game": room_state_payload(room)})
-                    await broadcast(
-                        room,
-                        {"type": "turn_update", "current_player": room.state["current_player"], "phase": room.state["phase"]},
-                    )
+                    ch.state = gl.create_initial_state(25)
+                    await broadcast(ch, {"type": "rematch_result", "accepted": True, "message": "Rematch accepted. New game started."})
+                    await emit_state(ch)
                     continue
-                if room.state["game_over"]:
-                    await websocket.send_json({"type": "error", "message": "Game is already finished"})
-                    continue
-                if slot != room.state["current_player"]:
-                    await websocket.send_json({"type": "error", "message": "Not your turn"})
-                    continue
-
-                if mtype == "make_mark":
-                    if room.state["phase"] != "mark":
-                        await websocket.send_json({"type": "error", "message": "Phase is not mark"})
-                        continue
-                    sticker_id = msg.get("sticker_id")
-                    sticker = next((s for s in room.state["stickers"] if s["id"] == sticker_id), None)
-                    if not sticker or sticker["mark"] is not None:
-                        await websocket.send_json({"type": "error", "message": "Sticker invalid or occupied"})
-                        continue
-                    sticker["mark"] = "X" if slot == 0 else "O"
-                    result = evaluate_end_state(room.state, slot, "mark")
-                    await broadcast(
-                        room,
-                        {"type": "move_applied", "action": {"type": "make_mark", "sticker_id": sticker_id}, "by": slot},
-                    )
-                    if result["done"]:
-                        room.state["game_over"] = True
-                        room.state["winner"] = result["winner"]
-                        room.state["winner_mark"] = result["winnerMark"]
-                        room.state["reason"] = result["reason"]
-                        await broadcast(room, {"type": "state_snapshot", "game": room_state_payload(room)})
-                        await broadcast(
-                            room,
-                            {
-                                "type": "game_over",
-                                "winner": room.state["winner"],
-                                "winner_mark": room.state["winner_mark"],
-                                "reason": room.state["reason"],
-                                "draw": result["draw"],
-                            },
-                        )
-                    else:
-                        room.state["phase"] = "rotate"
-                        await broadcast(room, {"type": "state_snapshot", "game": room_state_payload(room)})
-                        await broadcast(
-                            room,
-                            {"type": "turn_update", "current_player": room.state["current_player"], "phase": room.state["phase"]},
-                        )
-                    continue
-
-                if mtype == "rotate_layer":
-                    if room.state["phase"] != "rotate":
-                        await websocket.send_json({"type": "error", "message": "Phase is not rotate"})
-                        continue
-                    axis = msg.get("axis")
-                    layer_coord = msg.get("layer_coord")
-                    direction = msg.get("dir")
-                    if axis not in {"x", "y", "z"} or layer_coord not in {-2, -1, 0, 1, 2} or direction not in {-1, 1}:
-                        await websocket.send_json({"type": "error", "message": "Invalid rotation"})
-                        continue
-                    if is_reverse_rotation_forbidden(room.state, slot, axis, layer_coord, direction):
-                        await websocket.send_json(
-                            {
-                                "type": "error",
-                                "message": "Illegal rotation: you cannot reverse opponent's most recent rotation",
-                            }
-                        )
-                        continue
-                    rotate_layer(room.state, axis, layer_coord, direction)
-                    room.state["last_rotation"] = {
-                        "by_player": slot,
-                        "axis": axis,
-                        "layer_coord": layer_coord,
-                        "dir": direction,
-                    }
-                    result = evaluate_end_state(room.state, slot, "rotation")
-                    await broadcast(
-                        room,
-                        {
-                            "type": "move_applied",
-                            "action": {"type": "rotate_layer", "axis": axis, "layer_coord": layer_coord, "dir": direction},
-                            "by": slot,
-                        },
-                    )
-                    if result["done"]:
-                        room.state["game_over"] = True
-                        room.state["winner"] = result["winner"]
-                        room.state["winner_mark"] = result["winnerMark"]
-                        room.state["reason"] = result["reason"]
-                        await broadcast(room, {"type": "state_snapshot", "game": room_state_payload(room)})
-                        await broadcast(
-                            room,
-                            {
-                                "type": "game_over",
-                                "winner": room.state["winner"],
-                                "winner_mark": room.state["winner_mark"],
-                                "reason": room.state["reason"],
-                                "draw": result["draw"],
-                            },
-                        )
-                    else:
-                        room.state["current_player"] = 1 - room.state["current_player"]
-                        room.state["phase"] = "mark"
-                        await broadcast(room, {"type": "state_snapshot", "game": room_state_payload(room)})
-                        await broadcast(
-                            room,
-                            {"type": "turn_update", "current_player": room.state["current_player"], "phase": room.state["phase"]},
-                        )
-                    continue
-
-                if mtype == "skip_rotation":
-                    if room.state["phase"] != "rotate":
-                        await websocket.send_json({"type": "error", "message": "Phase is not rotate"})
-                        continue
-                    room.state["current_player"] = 1 - room.state["current_player"]
-                    room.state["phase"] = "mark"
-                    await broadcast(room, {"type": "move_applied", "action": {"type": "skip_rotation"}, "by": slot})
-                    await broadcast(room, {"type": "state_snapshot", "game": room_state_payload(room)})
-                    await broadcast(
-                        room,
-                        {"type": "turn_update", "current_player": room.state["current_player"], "phase": room.state["phase"]},
-                    )
-                    continue
-
-                await websocket.send_json({"type": "error", "message": "Unknown message type"})
+                ok, err = await process_game_action(ch, mtype, msg, slot, allow_controller=False)
+                if not ok:
+                    await websocket.send_json({"type": "error", "message": err})
     except WebSocketDisconnect:
         pass
     finally:
-        async with room.lock:
-            if room.sockets.get(slot) is websocket:
-                room.sockets.pop(slot, None)
-            if slot in room.participants:
-                room.participants[slot]["connected"] = False
-            if room.rematch_requester is not None:
-                if slot == room.rematch_requester or slot == (1 - room.rematch_requester):
-                    room.rematch_requester = None
-                    await broadcast(
-                        room,
-                        {
-                            "type": "rematch_result",
-                            "accepted": False,
-                            "by_slot": slot,
-                            "message": "Rematch request canceled (player disconnected).",
-                        },
-                    )
-            room.last_active = now_utc()
-            await broadcast(room, {"type": "peer_left", "slot": slot})
+        async with ch.lock:
+            if ch.sockets.get(slot) is websocket:
+                ch.sockets.pop(slot, None)
+            if slot in ch.participants:
+                ch.participants[slot]["connected"] = False
+            if ch.rematch_requester is not None:
+                if slot == ch.rematch_requester or slot == (1 - ch.rematch_requester):
+                    ch.rematch_requester = None
+                    await broadcast(ch, {"type": "rematch_result", "accepted": False, "message": "Rematch request canceled (player disconnected)."})
+            ch.last_active = now_utc()
+            await broadcast(ch, {"type": "peer_left", "slot": slot})
+
+
+@app.websocket("/ws/sessions/{session_id}")
+async def ws_session(websocket: WebSocket, session_id: str, player_name: str = Query("Player")) -> None:
+    prune_channels()
+    ch = sessions.get(session_id)
+    if ch is None:
+        await websocket.close(code=4404, reason="Session not found")
+        return
+    await websocket.accept()
+    slot = 0
+
+    async with ch.lock:
+        ch.participants[slot] = {"name": (player_name or "Player").strip(), "connected": True}
+        ch.sockets[slot] = websocket
+        ch.last_active = now_utc()
+        await websocket.send_json({"type": "joined", "session_id": ch.channel_id, "slot": slot, "controller": True, "mode": ch.mode})
+        await websocket.send_json({"type": "state_snapshot", "game": gl.serialize_state(ch.state)})
+        await broadcast(ch, {"type": "turn_update", "current_player": ch.state["current_player"], "phase": ch.state["phase"]})
+        await run_pve_ai_if_needed(ch)
+
+    try:
+        while True:
+            msg = await websocket.receive_json()
+            mtype = msg.get("type")
+            async with ch.lock:
+                ch.last_active = now_utc()
+                if mtype == "sync_request":
+                    await websocket.send_json({"type": "state_snapshot", "game": gl.serialize_state(ch.state)})
+                    continue
+                if mtype == "leave":
+                    break
+                if mtype == "join":
+                    await websocket.send_json({"type": "joined", "session_id": ch.channel_id, "slot": slot, "controller": True, "mode": ch.mode})
+                    continue
+                if mtype in {"request_new_game", "new_game_response"}:
+                    ch.state = gl.create_initial_state(25)
+                    await broadcast(ch, {"type": "rematch_result", "accepted": True, "message": "New local game started."})
+                    await emit_state(ch)
+                    await run_pve_ai_if_needed(ch)
+                    continue
+                ok, err = await process_game_action(ch, mtype, msg, slot, allow_controller=True)
+                if not ok:
+                    await websocket.send_json({"type": "error", "message": err})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        async with ch.lock:
+            if ch.sockets.get(slot) is websocket:
+                ch.sockets.pop(slot, None)
+            if slot in ch.participants:
+                ch.participants[slot]["connected"] = False
+            ch.last_active = now_utc()

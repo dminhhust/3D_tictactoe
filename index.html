@@ -300,9 +300,10 @@
     const mctsTimeBudgetMs = 1500;
     let roomId = null;
     let inviteToken = null;
+    let sessionId = null;
     let ws = null;
     let mySlot = null;
-    let onlineConnected = false;
+    let socketConnected = false;
     let lastRotation = null; // { byPlayer, axis, layerCoord, dir } | null
 
     const raycaster = new THREE.Raycaster();
@@ -686,11 +687,12 @@
     }
 
     function isMyTurnOnline() {
-      return isOnlineMode() && onlineConnected && mySlot !== null && mySlot === currentPlayer && !gameOver;
+      return isOnlineMode() && socketConnected && mySlot !== null && mySlot === currentPlayer && !gameOver;
     }
 
     function isHumanInputLocked() {
       if (gameOver || rotating || aiThinking || isAiTurn()) return true;
+      if (!socketConnected) return true;
       if (isOnlineMode()) return !isMyTurnOnline() || phase === 'gameover';
       return false;
     }
@@ -699,12 +701,11 @@
       const prev = gameMode;
       gameMode = mode === 'online_duel' ? 'online_duel' : (mode === 'pve_local' ? 'pve_local' : 'pvp_local');
       if (gameMode !== 'pve_local') aiThinking = false;
-      if (prev === 'online_duel' && gameMode !== 'online_duel') {
+      if (prev !== gameMode) {
         closeOnlineSocket();
       }
       modeSelect.value = gameMode;
       refreshHud();
-      maybeRunAiTurn();
     }
 
     function refreshHud() {
@@ -715,8 +716,8 @@
         ? 'Disabled'
         : (aiThinking ? 'Thinking...' : (isAiTurn() ? 'Ready' : 'Idle'));
       onlineStatusText.textContent = !isOnlineMode()
-        ? 'Offline'
-        : (onlineConnected ? ('Connected (You: ' + (mySlot === 0 ? 'X' : mySlot === 1 ? 'O' : '?') + ')') : 'Connecting...');
+        ? (socketConnected ? 'Connected' : 'Connecting...')
+        : (socketConnected ? ('Connected (You: ' + (mySlot === 0 ? 'X' : mySlot === 1 ? 'O' : '?') + ')') : 'Connecting...');
       createRoomBtn.disabled = rotating || aiThinking;
       skipRotateBtn.disabled = isHumanInputLocked() || phase !== 'rotate';
       updateRotationButtonsVisual();
@@ -1264,7 +1265,6 @@
       switchPlayer();
       setMessage(text, 'info');
       refreshHud();
-      maybeRunAiTurn();
     }
 
     function executeAiMove(move) {
@@ -1400,12 +1400,19 @@
       return proto + '://' + window.location.host + '/ws/rooms/' + encodeURIComponent(targetRoomId) + '?' + q.toString();
     }
 
+    function wsUrlForSession(targetSessionId, playerName) {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const q = new URLSearchParams();
+      q.set('player_name', playerName || 'Player');
+      return proto + '://' + window.location.host + '/ws/sessions/' + encodeURIComponent(targetSessionId) + '?' + q.toString();
+    }
+
     function closeOnlineSocket() {
       if (ws) {
         try { ws.close(); } catch (_) {}
       }
       ws = null;
-      onlineConnected = false;
+      socketConnected = false;
       mySlot = null;
       refreshHud();
     }
@@ -1416,16 +1423,16 @@
       closeOnlineSocket();
       ws = new WebSocket(wsUrlForRoom(targetRoomId, token, playerName));
       ws.onopen = () => {
-        onlineConnected = true;
+        socketConnected = true;
         ws.send(JSON.stringify({ type: 'join' }));
         refreshHud();
       };
       ws.onclose = () => {
-        onlineConnected = false;
+        socketConnected = false;
         refreshHud();
       };
       ws.onerror = () => {
-        onlineConnected = false;
+        socketConnected = false;
         refreshHud();
       };
       ws.onmessage = (event) => {
@@ -1504,6 +1511,68 @@
       setMessage('Online room created. Invite link copied (if clipboard allowed).', 'info');
     }
 
+    async function startLocalSession(modeValue) {
+      const playerName = window.prompt('Your player name:', 'Player') || 'Player';
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: modeValue, player_name: playerName })
+      });
+      if (!res.ok) throw new Error('Failed to create local session');
+      const data = await res.json();
+      sessionId = data.session_id;
+      closeOnlineSocket();
+      ws = new WebSocket(wsUrlForSession(sessionId, playerName));
+      ws.onopen = () => {
+        socketConnected = true;
+        ws.send(JSON.stringify({ type: 'join' }));
+        refreshHud();
+      };
+      ws.onclose = () => {
+        socketConnected = false;
+        refreshHud();
+      };
+      ws.onerror = () => {
+        socketConnected = false;
+        refreshHud();
+      };
+      ws.onmessage = (event) => {
+        let msg = null;
+        try { msg = JSON.parse(event.data); } catch (_) { return; }
+        if (!msg || !msg.type) return;
+        if (msg.type === 'joined') {
+          mySlot = msg.slot ?? 0;
+          refreshHud();
+          return;
+        }
+        if (msg.type === 'state_snapshot') {
+          applyServerSnapshot(msg.game);
+          return;
+        }
+        if (msg.type === 'turn_update') {
+          if (typeof msg.current_player === 'number') currentPlayer = msg.current_player;
+          if (typeof msg.phase === 'string') phase = msg.phase;
+          refreshHud();
+          return;
+        }
+        if (msg.type === 'game_over') {
+          gameOver = true;
+          phase = 'gameover';
+          if (msg.draw) setMessage('Game draw.', 'info');
+          else setMessage('Winner: Player ' + (msg.winner_mark || '?') + '.', 'win');
+          refreshHud();
+          return;
+        }
+        if (msg.type === 'rematch_result') {
+          setMessage(msg.message || 'Game reset.', 'info');
+          return;
+        }
+        if (msg.type === 'error') {
+          setMessage('Server error: ' + msg.message, 'lose');
+        }
+      };
+    }
+
     function sendOnline(action) {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         setMessage('Online connection is not ready.', 'lose');
@@ -1518,55 +1587,30 @@
 
     function skipRotation() {
       if (phase !== 'rotate' || isHumanInputLocked()) return;
-      if (isOnlineMode()) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         sendOnline({ type: 'skip_rotation' });
         return;
       }
-      finalizeTurnAndMaybeTriggerAi('Rotation skipped. Next player: place a mark.');
+      setMessage('Server connection is required for rotation.', 'lose');
     }
 
     function beginNewGame() {
-      if (isOnlineMode()) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          sendOnline({ type: 'request_new_game' });
-          setMessage('Rematch requested. Waiting for opponent response.', 'info');
-        } else {
-          setMessage('Online mode: connect to a room first.', 'info');
-        }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        sendOnline({ type: 'request_new_game' });
+        setMessage(isOnlineMode() ? 'Rematch requested. Waiting for opponent response.' : 'Requesting new local game...', 'info');
         return;
       }
-      clearBoardMeshes();
-      buildStickersFromSolvedCube();
-      scrambleCube();
-      currentPlayer = 0;
-      phase = 'mark';
-      gameOver = false;
-      aiThinking = false;
-      lastRotation = null;
-      hoveredLayerCoord = null;
-      selectedLayer = 2;
-      selectedAxis = getCurrentViewAxis();
-      buildRotationButtons();
-      rebuildFaceGrids();
-      refreshHud();
-      setMessage('New game started. Player X marks first.', 'info');
-      maybeRunAiTurn();
+      setMessage(isOnlineMode() ? 'Online room is not connected.' : 'Local backend session is not connected.', 'lose');
     }
 
     function tryMarkSticker(sticker) {
       if (!sticker || phase !== 'mark' || isHumanInputLocked()) return;
       if (sticker.mark !== null) return;
-      if (isOnlineMode()) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         sendOnline({ type: 'make_mark', sticker_id: sticker.id });
         return;
       }
-      sticker.mark = PLAYER_MARKS[currentPlayer];
-      createMarkOverlay(sticker, sticker.mark);
-      const ended = evaluateEndState(currentPlayer, 'mark');
-      if (ended) return;
-      phase = 'rotate';
-      setMessage('Mark placed. Rotate one layer or skip.', 'info');
-      refreshHud();
+      setMessage('Server connection is required to place mark.', 'lose');
     }
 
     function rotateFromInput(dir) {
@@ -1576,16 +1620,11 @@
         setMessage("Illegal move: you cannot reverse opponent's most recent rotation.", 'lose');
         return;
       }
-      if (isOnlineMode()) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
         sendOnline({ type: 'rotate_layer', axis: selectedAxis, layer_coord: layerCoord, dir });
         return;
       }
-      performRotation(selectedAxis, layerCoord, dir, true, () => {
-        lastRotation = { byPlayer: currentPlayer, axis: selectedAxis, layerCoord, dir };
-        const ended = evaluateEndState(currentPlayer, 'rotation');
-        if (ended) return;
-        finalizeTurnAndMaybeTriggerAi('Rotation finished. Next player: place a mark.');
-      });
+      setMessage('Server connection is required for rotation.', 'lose');
     }
 
     function onPointerMove(event) {
@@ -1686,6 +1725,11 @@
       if (gameMode === 'pvp_local') setMessage('PvP local mode selected.', 'info');
       else if (gameMode === 'pve_local') setMessage('PvE local mode selected. Human is X, AI is O.', 'info');
       else setMessage('Online duel mode selected. Create or join a room.', 'info');
+      if (gameMode !== 'online_duel') {
+        startLocalSession(gameMode).catch((err) => {
+          setMessage('Failed to start local session: ' + (err && err.message ? err.message : String(err)), 'lose');
+        });
+      }
     });
 
     function animate() {
@@ -1695,7 +1739,10 @@
       renderer.render(scene, camera);
     }
 
-      beginNewGame();
+      clearBoardMeshes();
+      buildStickersFromSolvedCube();
+      rebuildFaceGrids();
+      refreshHud();
       const params = new URLSearchParams(window.location.search);
       const modeParam = params.get('mode');
       const qRoom = params.get('room_id');
@@ -1707,6 +1754,9 @@
         connectOnlineRoom(qRoom, qToken, playerName);
       } else {
         setGameMode(modeSelect.value);
+        startLocalSession(gameMode).catch((err) => {
+          setMessage('Failed to start local session: ' + (err && err.message ? err.message : String(err)), 'lose');
+        });
       }
       animate();
     }

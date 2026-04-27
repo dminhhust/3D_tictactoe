@@ -1,6 +1,6 @@
 # 3D Rubik's Cube Tic-Tac-Toe
 
-This project uses a **frontend-backend architecture**:
+This project uses a **backend-authoritative architecture**:
 
 - Frontend: `index.html` (Three.js game client)
 - Backend: `backend/app.py` (FastAPI + WebSocket authority server)
@@ -8,14 +8,14 @@ This project uses a **frontend-backend architecture**:
 
 ## Modes
 
-- `PvP Local`: 2 humans on one screen
-- `PvE Local (MCTS)`: human (X) vs AI (O), pure MCTS (time budget ~1.5s)
-- `Online Duel`: server-authoritative two-player room via invitation link
+- `PvP Local`: local session hosted by backend (`/api/sessions`)
+- `PvE Local (MCTS)`: backend-controlled AI turn decisions
+- `Online Duel`: backend room with invitation link (`/api/rooms`)
 - Reverse-rotation guard: a player cannot directly reverse the opponent's most recent Rubik layer rotation.
 
 ## Install and run
 
-From `path to folder`:
+From `D:\self_study\3D_tictactoe`:
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -40,6 +40,12 @@ You can also use:
 4. Guest opens the link; backend redirects to game URL and auto-connects to room.
 5. Server validates all mark/rotate/skip actions and broadcasts authoritative state.
 6. In online mode, pressing **New Game** sends a rematch request; opponent must accept to start a new game.
+
+## Local modes now use backend sessions
+
+- Selecting `PvP Local` or `PvE Local` creates a backend session.
+- Frontend sends only commands; backend returns authoritative snapshots.
+- No client-only gameplay authority is used.
 
 Room behavior:
 - Ephemeral in-memory room (no DB).
