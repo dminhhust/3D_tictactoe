@@ -1,6 +1,6 @@
 # 3D Rubik's Cube Tic-Tac-Toe
 
-This project now uses a **frontend-backend architecture**:
+This project uses a **frontend-backend architecture**:
 
 - Frontend: `index.html` (Three.js game client)
 - Backend: `backend/app.py` (FastAPI + WebSocket authority server)
@@ -15,7 +15,7 @@ This project now uses a **frontend-backend architecture**:
 
 ## Install and run
 
-From `D:\self_study\3D_tictactoe`:
+From `path to folder`:
 
 ```powershell
 python -m pip install -r requirements.txt
